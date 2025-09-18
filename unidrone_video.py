@@ -1,4 +1,4 @@
-import os, json, zipfile, threading, time, math, sys
+import os, json, zipfile, threading, time, math, sys, subprocess, shutil
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -6,10 +6,40 @@ from tkinter import filedialog, messagebox, ttk
 import cv2
 import numpy as np
 import pandas as pd
-
 import torch
-from ultralytics import YOLO
 from PIL import Image, ImageTk
+
+# === Preferuj lokalne ./_pkgs (gdy uruchamiasz bez bootstrap_env) ===
+PKGS = Path(__file__).parent / "_pkgs"
+if PKGS.exists():
+    sys.path.insert(0, str(PKGS))
+
+# === „Bezpiecznik” Ultralytics (YOLOv11 + spójny default.yaml) ===
+try:
+    from ultralytics.nn.modules import block as _ublock
+    assert hasattr(_ublock, "C3k2"), "Brak bloku C3k2 (YOLOv11) — zbyt stara wersja ultralytics."
+    from ultralytics.cfg import get_cfg as _get_cfg
+    _cfg = _get_cfg()  # IterableSimpleNamespace z kluczami z default.yaml
+    # różne wersje mogą używać różnych kluczy dot. „fuse”, sprawdzamy defensywnie
+    _ok_cfg = any(hasattr(_cfg, k) for k in ("fuse_score", "fuse", "fuse_above_conf", "fuse_above"))
+    if not _ok_cfg:
+        raise RuntimeError("Niezgodny default.yaml w ultralytics — spróbuj uruchomić przez bootstrap_env.py")
+except Exception as e:
+    try:
+        _root = tk.Tk(); _root.withdraw()
+        messagebox.showerror(
+            "Ultralytics mismatch",
+            "Wykryto niezgodność Ultralytics (YOLOv11 / default.yaml).\n\n"
+            "Uruchom ten program przez:\n    python bootstrap_env.py unidrone_video.py\n"
+            "albo użyj lokalnego venv z aktualnym ultralytics.\n\n"
+            f"Szczegóły: {e}"
+        )
+    except Exception:
+        print("Ultralytics mismatch:", e, file=sys.stderr)
+    sys.exit(1)
+
+# Dopiero teraz importujemy YOLO
+from ultralytics import YOLO
 
 try:
     import supervision as sv
@@ -723,6 +753,7 @@ class App(tk.Tk):
                 if self.abort_event.is_set(): break
                 self._log(f"► Wideo {vi+1}/{len(videos)}: {vid_path.name}")
 
+                # otwórz raz, żeby pobrać parametry
                 cap = cv2.VideoCapture(str(vid_path))
                 if not cap.isOpened():
                     self._log(f"[WARN] Nie można otworzyć: {vid_path}")
@@ -752,7 +783,7 @@ class App(tk.Tk):
                     self._log(f"[ERR] Nie można otworzyć VideoWriter dla: {vid_path.name}")
                     continue
 
-                # Przygotuj tracker-konfig dla ultralytics (tymczasowy yaml)
+                # Przygotuj tracker-konfig (tymczasowy yaml)
                 tracker_yaml = (temp_dir / f"{tracker_kind}.yaml")
                 with open(tracker_yaml, "w", encoding="utf-8") as f:
                     if tracker_kind == "botsort":

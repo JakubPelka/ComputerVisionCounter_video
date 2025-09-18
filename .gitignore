@@ -1,0 +1,5 @@
+/wheels
+/_pkgs
+/indata
+/results
+models/yolo11x.pt

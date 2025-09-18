@@ -1,225 +1,199 @@
 # bootstrap_env.py
-# Windows-only bootstrapper: installs/updates packages to ./_pkgs
-# 1) Try ONLINE (PyPI + official PyTorch CPU index)
-# 2) If offline/failure -> OFFLINE from ./wheels
-# 3) Verify YOLOv11 support (C3k2); if missing -> force (re)install ultralytics
-# 4) Run target app (default: unidrone_app.py; override: pass filename as arg)
-
-from __future__ import annotations
-import sys, subprocess, os, socket, runpy, json
+# Portable środowisko w ./_pkgs z fallbackiem offline z ./wheels
+import sys, os, subprocess, socket, runpy, argparse
 from pathlib import Path
-from importlib import import_module
-from importlib.metadata import version as get_version, PackageNotFoundError
 
-BASE = Path(__file__).parent.resolve()
-PKGS_DIR = BASE / "_pkgs"
-WHEELS_DIR = BASE / "wheels"
+PROJECT_DIR = Path(__file__).parent.resolve()
+PKGS_DIR    = PROJECT_DIR / "_pkgs"
+WHEELS_DIR  = PROJECT_DIR / "wheels"
 
-# === target app ===
-DEFAULT_APP = "unidrone_app.py"  # możesz uruchomić video: python bootstrap_env.py unidrone_video.py
-APP_PATH = BASE / (sys.argv[1] if len(sys.argv) > 1 else DEFAULT_APP)
+DEFAULT_TARGET = "unidrone_video.py"   # auto-start gdy brak argumentów
 
-# === Requirements ===
-# Torch/vision z CPU indexu – sprawdzone na Py 3.11/3.12 (CPU)
-REQUIREMENTS_TORCH = [
-    "torch==2.3.1+cpu",
-    "torchvision==0.18.1+cpu",
-]
-PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
-
-# Reszta z PyPI – UWAGA: ultralytics wersja z obsługą YOLOv11
-REQUIREMENTS_REST = [
-    "ultralytics>=8.3.0",      # YOLOv11 (m.in. warstwa C3k2)
-    "opencv-python>=4.8.0",
-    "numpy>=1.26.0,<2.0.0",
-    "pandas>=2.1.0",
-    "pillow>=10.2.0",
-    "tqdm>=4.66.0",
-    "supervision>=0.21.0",
-    "PyYAML>=6.0",
-    "scipy>=1.11.0",
-    "onnx>=1.15.0",
-    "onnxruntime>=1.17.0",
+# --- wersje/pakiety (YOLOv11 + CPU) ---
+ULTRA_VER   = "8.3.201"
+TORCH_CPU   = ("torch==2.3.1+cpu", "torchvision==0.18.1+cpu")
+TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
+PKGS = [
+    f"ultralytics=={ULTRA_VER}",
+    "supervision>=0.20.0",
+    "opencv-python>=4.10.0.0",
+    "numpy>=1.26.4",
+    "pandas>=2.2.2",
+    "Pillow>=10.3.0",
+    "PyYAML>=6.0.1",
+    "scipy>=1.11.4",
+    "onnx>=1.16.0",
+    "onnxruntime==1.22.1; platform_system=='Windows'",
 ]
 
-SMOKE_IMPORTS = [
-    ("torch", None),
-    ("torchvision", None),
-    ("ultralytics", None),
-    ("cv2", None),
-    ("numpy", None),
-    ("pandas", None),
-    ("PIL", None),
-    ("tqdm", None),
-    ("yaml", None),
-    ("scipy", None),
-    ("onnxruntime", None),
-]
+def log(msg): print(msg, flush=True)
 
-def is_online(host="pypi.org", port=443, timeout=2.5) -> bool:
+def ensure_dirs():
+    PKGS_DIR.mkdir(parents=True, exist_ok=True)
+    WHEELS_DIR.mkdir(parents=True, exist_ok=True)
+
+def prefer_local():
+    # Wpychamy _pkgs na początek sys.path (nadpisuje site-packages)
+    p = str(PKGS_DIR)
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+def is_online(host="pypi.org", port=443, timeout=2.0) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
     except OSError:
         return False
 
-def add_pkgs_to_syspath():
-    if str(PKGS_DIR) not in sys.path:
-        sys.path.insert(0, str(PKGS_DIR))
-
-def run_pip(args: list[str]) -> int:
-    cmd = [sys.executable, "-m", "pip"] + args
-    print(">>", " ".join(cmd))
-    return subprocess.call(cmd)
-
-def have_all_imports(verbose=True) -> bool:
-    add_pkgs_to_syspath()
-    ok = True
-    for mod, _ in SMOKE_IMPORTS:
-        try:
-            import_module(mod)
-            if verbose:
-                try:
-                    print(f"[OK] import {mod} ({get_version(mod)})")
-                except PackageNotFoundError:
-                    print(f"[OK] import {mod}")
-        except Exception as e:
-            ok = False
-            if verbose:
-                print(f"[MISS] {mod}: {e}")
-    return ok
-
-def ultralytics_supports_yolo11() -> bool:
-    """
-    YOLOv11 używa m.in. bloku C3k2 w ultralytics.nn.modules.block.
-    Jeśli atrybutu brak -> pakiet jest za stary.
-    """
-    try:
-        add_pkgs_to_syspath()
-        from ultralytics.nn.modules import block as ublock
-        return hasattr(ublock, "C3k2")
-    except Exception:
-        return False
+def pip_run(args: list[str]) -> bool:
+    """Uruchamia pip i streamuje output w czasie rzeczywistym."""
+    cmd = [sys.executable, "-m", "pip", *args]
+    print(">>>", " ".join(cmd), flush=True)
+    # Nie buforujemy – paski postępu i logi są widoczne od razu
+    return subprocess.call(cmd) == 0
 
 def install_online() -> bool:
-    print("\n=== ONLINE INSTALL (to ./_pkgs) ===")
-    PKGS_DIR.mkdir(parents=True, exist_ok=True)
-
-    run_pip(["install", "--upgrade", "pip"])
-
-    rc_t = run_pip([
-        "install", "--index-url", PYTORCH_CPU_INDEX, "--target", str(PKGS_DIR),
-        *REQUIREMENTS_TORCH
-    ])
-    if rc_t != 0:
-        print("[WARN] Torch CPU install failed (continuing).")
-
-    rc_r = run_pip(["install", "--target", str(PKGS_DIR), *REQUIREMENTS_REST])
-    if rc_r != 0:
-        print("[WARN] Some packages failed from PyPI.")
-
-    return have_all_imports(verbose=True)
-
-def install_offline_from_wheels() -> bool:
-    print("\n=== OFFLINE INSTALL from ./wheels (to ./_pkgs) ===")
-    if not WHEELS_DIR.exists():
-        print("[ERR] ./wheels directory not found.")
-        return False
-
-    PKGS_DIR.mkdir(parents=True, exist_ok=True)
-
-    rc = run_pip([
-        "install", "--no-index", "--find-links", str(WHEELS_DIR),
+    log("[NET] Internet OK → instaluję do ./_pkgs")
+    ok = pip_run([
+        "install", "--upgrade", "--no-warn-script-location",
+        "--default-timeout", "180", "--progress-bar", "on",
         "--target", str(PKGS_DIR),
-        *REQUIREMENTS_TORCH, *REQUIREMENTS_REST
+        "--index-url", TORCH_INDEX, *TORCH_CPU
     ])
-    if rc != 0:
-        print("[WARN] Offline constraints failed, trying all *.whl directly…")
-        wheel_files = sorted(str(p) for p in WHEELS_DIR.glob("*.whl"))
-        if not wheel_files:
-            print("[ERR] No .whl files in ./wheels.")
-            return False
-        rc2 = run_pip(["install", "--no-index", "--target", str(PKGS_DIR), *wheel_files])
-        if rc2 != 0:
-            print("[ERR] Offline install from wheel files failed.")
-            return False
-
-    return have_all_imports(verbose=True)
-
-def force_update_ultralytics(online: bool) -> bool:
-    """
-    Wymusza reinstall ultralytics do wersji z YOLOv11.
-    """
-    print("\n=== Force (re)install ultralytics for YOLOv11 ===")
-    # Odinstaluj starą wersję z ./_pkgs (jeśli jest)
-    run_pip(["uninstall", "-y", "ultralytics"])
-
-    if online:
-        rc = run_pip(["install", "--target", str(PKGS_DIR), "ultralytics>=8.3.0"])
-    else:
-        if not WHEELS_DIR.exists():
-            print("[ERR] wheels/ missing; cannot offline-install ultralytics.")
-            return False
-        # Spróbuj dopasować najnowsze koło z katalogu wheels
-        whls = sorted([p for p in WHEELS_DIR.glob("ultralytics-*.whl")], reverse=True)
-        if not whls:
-            print("[ERR] No ultralytics wheel in ./wheels.")
-            return False
-        rc = run_pip(["install", "--no-index", "--target", str(PKGS_DIR), str(whls[0])])
-
-    if rc != 0:
-        print("[ERR] ultralytics reinstall failed.")
+    if not ok:
+        log("[ERR] torch/torchvision (CPU) — instalacja nie powiodła się.")
         return False
+    ok = pip_run([
+        "install", "--upgrade", "--no-warn-script-location",
+        "--default-timeout", "180", "--progress-bar", "on",
+        "--target", str(PKGS_DIR), *PKGS
+    ])
+    if not ok:
+        log("[ERR] instalacja pozostałych pakietów nie powiodła się.")
+        return False
+    return True
 
-    add_pkgs_to_syspath()
-    ok = ultralytics_supports_yolo11()
-    print(f"[CHK] YOLOv11 support (C3k2): {'OK' if ok else 'NO'}")
+def install_offline() -> bool:
+    log("[OFFLINE] Brak internetu → próbuję z ./wheels")
+    if not any(WHEELS_DIR.glob("*.whl")):
+        log("[ERR] Katalog ./wheels jest pusty.")
+        return False
+    # Najpierw (jeśli są) koła torch/vision
+    pip_run([
+        "install", "--no-index", "--find-links", str(WHEELS_DIR),
+        "--no-warn-script-location", "--default-timeout", "180", "--progress-bar", "on",
+        "--target", str(PKGS_DIR), *TORCH_CPU
+    ])
+    # Reszta
+    return pip_run([
+        "install", "--no-index", "--find-links", str(WHEELS_DIR),
+        "--no-warn-script-location", "--default-timeout", "180", "--progress-bar", "on",
+        "--target", str(PKGS_DIR), *PKGS
+    ])
+
+def module_path(m) -> str:
+    return getattr(m, "__file__", "") or ""
+
+def verify_imports() -> bool:
+    prefer_local()
+    ok = True
+    try:
+        import ultralytics
+        from ultralytics.nn.modules import block as blk
+        upath = module_path(ultralytics)
+        print(f"[OK] ultralytics {ultralytics.__version__} @ {upath}")
+        if not hasattr(blk, "C3k2"):
+            raise RuntimeError("Ultralytics bez bloku C3k2 (za stara wersja na YOLOv11).")
+        if str(PKGS_DIR) not in upath:
+            print("[WARN] ultralytics importuje się spoza _pkgs — ale _pkgs jest preferowane w sys.path.")
+    except Exception as e:
+        print("[ERR] ultralytics:", e); ok = False
+
+    try:
+        import torch, torchvision, cv2, numpy, pandas, PIL, yaml, scipy
+        print(f"[OK] torch {torch.__version__} @ {module_path(torch)}")
+        print(f"[OK] torchvision {torchvision.__version__} @ {module_path(torchvision)}")
+        print(f"[OK] opencv {cv2.__version__} @ {module_path(cv2)}")
+        print(f"[OK] numpy {numpy.__version__} @ {module_path(numpy)}")
+        print(f"[OK] pandas {pandas.__version__} @ {module_path(pandas)}")
+        print(f"[OK] Pillow {PIL.__version__} @ {module_path(PIL)}")
+        print(f"[OK] PyYAML {yaml.__version__} @ {module_path(yaml)}")
+        print(f"[OK] scipy {scipy.__version__} @ {module_path(scipy)}")
+    except Exception as e:
+        print("[ERR] import pakietów:", e); ok = False
+
+    try:
+        mods = list(PKGS_DIR.iterdir())
+        print(f"[INFO] _pkgs zawiera: {len(mods)} obiektów (np.: {', '.join([m.name for m in mods[:8]])} …)")
+    except Exception:
+        pass
     return ok
 
+def need_install(force: bool) -> bool:
+    """Instalujemy, jeżeli:
+       - wymuszono --force, LUB
+       - w _pkgs NIE ma folderu pakietu (np. '_pkgs/ultralytics'), LUB
+       - import ultralytics nie wskazuje na _pkgs.
+    """
+    if force:
+        return True
+    if not (PKGS_DIR / "ultralytics").exists():
+        return True
+    prefer_local()
+    try:
+        import ultralytics
+        return str(PKGS_DIR) not in module_path(ultralytics)
+    except Exception:
+        return True
+
 def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--force", action="store_true", help="wymuś reinstalację do ./_pkgs")
+    parser.add_argument("--offline", action="store_true", help="wymuś tryb offline (instalacja z ./wheels)")
+    args, rest = parser.parse_known_args()
+
     print("=== bootstrap_env.py ===")
-    print(f"Python: {sys.executable}")
-    print(f"Project: {BASE}")
-    print(f"PKGS_DIR: {PKGS_DIR}")
+    print(f"Python:     {sys.executable}")
+    print(f"Project:    {PROJECT_DIR}")
+    print(f"PKGS_DIR:   {PKGS_DIR}")
     print(f"WHEELS_DIR: {WHEELS_DIR}")
-    print(f"Target app: {APP_PATH.name}\n")
 
-    add_pkgs_to_syspath()
+    ensure_dirs()
+    prefer_local()
 
-    # 0) Quick check
-    have = have_all_imports(verbose=True)
-    online = is_online()
-
-    if not have:
-        if online:
-            print("\n[INFO] Network available -> trying online install…")
-            ok = install_online()
-            if not ok:
-                print("\n[INFO] Online incomplete -> trying offline wheels…")
-                ok = install_offline_from_wheels()
-        else:
-            print("\n[INFO] No network -> trying offline wheels…")
-            ok = install_offline_from_wheels()
-
+    if need_install(args.force):
+        ok = install_offline() if args.offline or not is_online() else install_online()
         if not ok:
-            print("\n[FATAL] Could not install all required packages.")
+            print("[ERR] Instalacja nie powiodła się — sprawdź internet albo wrzuć koła do ./wheels.")
             sys.exit(1)
+    else:
+        print("[INFO] Pakiety w _pkgs wykryte — pomijam instalację.")
 
-    # 1) YOLOv11 sanity (C3k2 present?)
-    if not ultralytics_supports_yolo11():
-        print("[INFO] Current ultralytics seems too old for YOLOv11 (missing C3k2).")
-        if not force_update_ultralytics(online=online):
-            print("\n[FATAL] ultralytics still misses YOLOv11 support.")
-            print(" - If offline, place a recent ultralytics wheel in ./wheels and rerun.")
-            sys.exit(1)
-
-    # 2) Launch app
-    if not APP_PATH.exists():
-        print(f"\n[ERR] {APP_PATH.name} not found next to bootstrap_env.py")
+    if not verify_imports():
+        print("[ERR] Importy niepełne/niezgodne — patrz log powyżej.")
         sys.exit(1)
 
-    print("\n=== Launching", APP_PATH.name, "===\n")
-    runpy.run_path(str(APP_PATH), run_name="__main__")
+    # wybór skryptu docelowego
+    if rest:
+        target_path = Path(rest[0]); target_args = rest[1:]
+    else:
+        default = PROJECT_DIR / DEFAULT_TARGET
+        if default.exists():
+            target_path = default; target_args = []
+            print(f"\n[INFO] Brak argumentów → startuję domyślnie: {DEFAULT_TARGET}")
+        else:
+            print("\nUżycie: python bootstrap_env.py [--force] [--offline] <skrypt.py> [args...]")
+            sys.exit(0)
+
+    if not target_path.is_absolute():
+        target_path = (PROJECT_DIR / target_path).resolve()
+    if not target_path.exists():
+        print(f"[ERR] Nie znaleziono: {target_path}"); sys.exit(2)
+
+    print(f"\n=== Launching {target_path.name} ===")
+    prefer_local()
+    sys.argv = [str(target_path), *target_args]
+    runpy.run_path(str(target_path), run_name="__main__")
 
 if __name__ == "__main__":
     main()
