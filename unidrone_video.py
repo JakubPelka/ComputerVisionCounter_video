@@ -14,31 +14,28 @@ PKGS = Path(__file__).parent / "_pkgs"
 if PKGS.exists():
     sys.path.insert(0, str(PKGS))
 
-# === „Bezpiecznik” Ultralytics (YOLOv11 + spójny default.yaml) ===
+# === Lekkie sprawdzenie Ultralytics (YOLOv11 / C3k2) ===
 try:
     from ultralytics.nn.modules import block as _ublock
-    assert hasattr(_ublock, "C3k2"), "Brak bloku C3k2 (YOLOv11) — zbyt stara wersja ultralytics."
-    from ultralytics.cfg import get_cfg as _get_cfg
-    _cfg = _get_cfg()  # IterableSimpleNamespace z kluczami z default.yaml
-    # różne wersje mogą używać różnych kluczy dot. „fuse”, sprawdzamy defensywnie
-    _ok_cfg = any(hasattr(_cfg, k) for k in ("fuse_score", "fuse", "fuse_above_conf", "fuse_above"))
-    if not _ok_cfg:
-        raise RuntimeError("Niezgodny default.yaml w ultralytics — spróbuj uruchomić przez bootstrap_env.py")
+    if not hasattr(_ublock, "C3k2"):
+        raise RuntimeError(
+            "Wykryto Ultralytics bez wsparcia YOLOv11 (brak bloku C3k2). "
+            "Uruchom przez bootstrap_env.py lub zaktualizuj pakiet."
+        )
 except Exception as e:
     try:
         _root = tk.Tk(); _root.withdraw()
         messagebox.showerror(
-            "Ultralytics mismatch",
-            "Wykryto niezgodność Ultralytics (YOLOv11 / default.yaml).\n\n"
-            "Uruchom ten program przez:\n    python bootstrap_env.py unidrone_video.py\n"
+            "Ultralytics za stare",
+            "Ta aplikacja wymaga Ultralytics z YOLOv11 (blok C3k2).\n\n"
+            "Uruchom przez:\n    python bootstrap_env.py unidrone_video.py\n"
             "albo użyj lokalnego venv z aktualnym ultralytics.\n\n"
             f"Szczegóły: {e}"
         )
     except Exception:
-        print("Ultralytics mismatch:", e, file=sys.stderr)
+        print("Ultralytics check:", e, file=sys.stderr)
     sys.exit(1)
 
-# Dopiero teraz importujemy YOLO
 from ultralytics import YOLO
 
 try:
@@ -53,31 +50,20 @@ class ScrollableFrame(tk.Frame):
         self.canvas = tk.Canvas(self, borderwidth=0, highlightthickness=0, height=height)
         self.vbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.vbar.set)
-
         self.vbar.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
-
         self.inner = tk.Frame(self.canvas)
         self.win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
-
-        # aktualizacja scrollregion, gdy zawartość się zmieni
         self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        # dopasuj szerokość okna do szerokości canvasu
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfig(self.win, width=e.width))
-
-        # przewijanie kółkiem (Windows)
         self.inner.bind_all("<MouseWheel>", self._on_mousewheel)
-
     def _on_mousewheel(self, event):
-        # delta 120 na Windows → krok 1
         self.canvas.yview_scroll(int(-event.delta/120), "units")
-
 
 # ===================== STAŁE / PRESETY =====================
 SUPPORTED_VID_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v", ".wmv")
 MODEL_DIRNAME = "models"
 
-# Presety jakości (dla wideo)
 VIDEO_PRESETS = {
     1: {"imgsz": 640,  "conf": 0.50, "iou": 0.60, "frame_skip": 2, "track_buffer": 30, "match_thresh": 0.80, "min_hits": 2},
     2: {"imgsz": 896,  "conf": 0.55, "iou": 0.55, "frame_skip": 2, "track_buffer": 45, "match_thresh": 0.80, "min_hits": 2},
@@ -85,10 +71,9 @@ VIDEO_PRESETS = {
     4: {"imgsz": 1280, "conf": 0.65, "iou": 0.50, "frame_skip": 1, "track_buffer": 75, "match_thresh": 0.75, "min_hits": 3},
     5: {"imgsz": 1280, "conf": 0.70, "iou": 0.45, "frame_skip": 0, "track_buffer": 90, "match_thresh": 0.75, "min_hits": 3},  # ULTRA
 }
-DEFAULT_QUALITY = 5  # ULTRA
-DEFAULT_TRACKER = "bytetrack"  # "bytetrack" lub "botsort"
+DEFAULT_QUALITY = 5
+DEFAULT_TRACKER = "bytetrack"
 
-# Histereza zdarzeń
 LINE_MIN_GAP_FRAMES_DEFAULT = 8
 LINE_MIN_SEP_PX_DEFAULT    = 12
 ZONE_MIN_GAP_FRAMES_DEFAULT = 6
@@ -174,7 +159,6 @@ def save_csv_collision(df: pd.DataFrame, path: Path) -> Path:
 
 # ====== Geometria linii/poligonów ======
 def line_side(a, b, p):
-    # znak det(B-A, P-A); >0 po lewej od A->B, <0 po prawej
     return (b[0]-a[0])*(p[1]-a[1]) - (b[1]-a[1])*(p[0]-a[0])
 
 def segments_intersect(p1, p2, q1, q2):
@@ -211,20 +195,11 @@ def point_in_polygon(pt, poly):
 
 # ===================== EDYTOR KONFIGU Linii/Poligonów =====================
 class CounterEditor(tk.Toplevel):
-    """
-    Edytor na pierwszej klatce: dodawanie wielu linii (A->B) i poligonów.
-    + Wczytywanie/zapisywanie konfiguracji JSON.
-    Sterowanie:
-      - 'Dodaj linię' -> klik A, klik B -> nazwa -> Zapisz
-      - 'Dodaj strefę' -> klikaj punkty (min 3, max 10), Enter kończy -> nazwa -> Zapisz
-      - Backspace cofa ostatni punkt
-      - Można usuwać ostatni element / czyścić wszystko
-    """
     def __init__(self, master, frame_bgr, default_cfg_path: Path|None=None):
         super().__init__(master)
         self.title("Konfiguracja liczników (pierwsza klatka)")
-        self.lines = []   # {name, a(x,y), b(x,y)}
-        self.zones = []   # {name, pts[[x,y],...]}
+        self.lines = []
+        self.zones = []
         self.mode = tk.StringVar(value="idle")
         self.cur_points = []
         self.default_cfg_path = default_cfg_path
@@ -237,7 +212,6 @@ class CounterEditor(tk.Toplevel):
         rgb = cv2.cvtColor(cv2.resize(frame_bgr, (disp_w, disp_h)), cv2.COLOR_BGR2RGB)
         self.tkimg = ImageTk.PhotoImage(Image.fromarray(rgb))
 
-        # UI
         self.canvas = tk.Canvas(self, width=disp_w, height=disp_h, bg="#222")
         self.canvas.pack(fill="both", expand=True)
         self.canvas_img = self.canvas.create_image(0,0,anchor="nw",image=self.tkimg)
@@ -255,7 +229,6 @@ class CounterEditor(tk.Toplevel):
         tk.Button(controls, text="OK (Zapisz i zamknij)", command=self.finish).pack(side="right", padx=4)
         self.hint = tk.Label(self, text="Tryb: bezczynny"); self.hint.pack(fill="x")
 
-        # auto-load default config jeśli istnieje
         if self.default_cfg_path and self.default_cfg_path.exists():
             try:
                 self.load_from_json(self.default_cfg_path)
@@ -269,7 +242,7 @@ class CounterEditor(tk.Toplevel):
         self.mode.set(m)
         self.cur_points = []
         if m == "line":
-            self.hint.config(text="Dodaj linię: kliknij punkt A, potem B. Backspace cofa, Enter kończy.")
+            self.hint.config(text="Dodaj linię: kliknij A, potem B. Backspace cofa, Enter kończy.")
         elif m == "zone":
             self.hint.config(text="Dodaj strefę: klikaj 3–10 punktów. Backspace cofa, Enter kończy.")
         else:
@@ -339,32 +312,27 @@ class CounterEditor(tk.Toplevel):
 
     def _redraw(self):
         self.canvas.delete("overlay")
-        # Cur points
         for i,p in enumerate(self.cur_points):
             dx,dy = self.img_to_disp(p[0], p[1])
             self.canvas.create_oval(dx-3, dy-3, dx+3, dy+3, fill="yellow", outline="", tags="overlay")
             if i>0:
                 px,py = self.img_to_disp(self.cur_points[i-1][0], self.cur_points[i-1][1])
                 self.canvas.create_line(px,py,dx,dy, fill="yellow", width=2, tags="overlay")
-        # Lines
         for ln in self.lines:
             a = self.img_to_disp(*ln["a"]); b = self.img_to_disp(*ln["b"])
             self.canvas.create_line(a[0],a[1],b[0],b[1], fill="#00FFFF", width=3, tags="overlay")
             self.canvas.create_text((a[0]+b[0])/2, (a[1]+b[1])/2 - 10, text=ln["name"], fill="#00FFFF", tags="overlay")
-        # Zones
         for zn in self.zones:
             pts = [self.img_to_disp(x,y) for x,y in zn["pts"]]
             for i in range(len(pts)):
                 x1,y1 = pts[i]; x2,y2 = pts[(i+1)%len(pts)]
                 self.canvas.create_line(x1,y1,x2,y2, fill="#FFAA00", width=2, tags="overlay")
-            # nazwa w centroidzie
             cx = sum([p[0] for p in zn["pts"]])/len(zn["pts"])
             cy = sum([p[1] for p in zn["pts"]])/len(zn["pts"])
             dcx, dcy = self.img_to_disp(cx, cy)
             self.canvas.create_text(dcx, dcy, text=zn["name"], fill="#FFAA00", tags="overlay")
 
     def finish(self):
-        # auto-save domyślną konfigurację jeśli mamy ścieżkę
         if self.default_cfg_path:
             try:
                 ensure_dir(self.default_cfg_path.parent)
@@ -374,7 +342,6 @@ class CounterEditor(tk.Toplevel):
                 pass
         self.destroy()
 
-    # === load/save dialog ===
     def load_dialog(self):
         f = filedialog.askopenfilename(title="Wczytaj konfigurację",
                                        filetypes=[("JSON","*.json"),("Wszystkie","*.*")])
@@ -419,14 +386,12 @@ class App(tk.Tk):
         self.weights_path = tk.StringVar(value=str(find_best_weights(models_default) or models_default))
 
         self.quality = tk.IntVar(value=DEFAULT_QUALITY)
-        self.tracker_kind = tk.StringVar(value=DEFAULT_TRACKER) # "bytetrack"|"botsort"
-
+        self.tracker_kind = tk.StringVar(value=DEFAULT_TRACKER)
         self.overlay_mode = tk.StringVar(value="centroid")  # "centroid"|"boxes"|"boxes_conf"
 
         self.model = None; self.names = None; self.class_vars = []
         self.selected_files = []
 
-        # Advanced
         self.advanced_override = False
         self.adv_params = {
             "imgsz": VIDEO_PRESETS[DEFAULT_QUALITY]["imgsz"],
@@ -441,7 +406,6 @@ class App(tk.Tk):
             "zone_min_gap": ZONE_MIN_GAP_FRAMES_DEFAULT,
         }
 
-        # Progress / abort
         self.progress_var = tk.DoubleVar(value=0.0)
         self.progress_label = tk.StringVar(value="Gotowe.")
         self.abort_event = threading.Event()
@@ -511,7 +475,6 @@ class App(tk.Tk):
         p = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
         self.preset_label.config(text=f"imgsz={p['imgsz']}  conf={p['conf']}  iou={p['iou']}  skip={p['frame_skip']}  buf={p['track_buffer']}  match={p['match_thresh']}  hits={p['min_hits']}")
 
-    # ==== pickers ====
     def browse_input(self):
         d = filedialog.askdirectory(title="Wybierz folder z wideo")
         if d: self.input_dir.set(d)
@@ -567,16 +530,10 @@ class App(tk.Tk):
             messagebox.showerror("Model", f"Nie można wczytać wag:\n{e}")
 
     def _populate_classes(self, names):
-        # Wyczyść
         container = self.classes_scroll.inner
-        for w in container.winfo_children():
-            w.destroy()
+        for w in container.winfo_children(): w.destroy()
         self.class_vars.clear()
-
-        # Lista nazw z modelu
         id2name = list(names.values()) if isinstance(names, dict) else list(names)
-
-        # Siatka: 5 kolumn; scroll rozwiązuje resztę
         cols = 5
         for i, nm in enumerate(id2name):
             var = tk.BooleanVar(value=False)
@@ -588,22 +545,18 @@ class App(tk.Tk):
     def selected_class_indices(self):
         return [idx for (nm, v, idx) in self.class_vars if v.get()]
 
-    # ==== advanced ====
     def open_advanced(self):
         win = tk.Toplevel(self); win.title("Opcje zaawansowane"); win.geometry("560x540")
         p = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
-
         def add_row(lbl, var):
             f = tk.Frame(win); f.pack(fill="x", pady=3)
             tk.Label(f, text=lbl, width=26, anchor="w").pack(side="left")
             e = tk.Entry(f, textvariable=var, width=18); e.pack(side="left"); return e
-
         base = self.adv_params if self.advanced_override else {**p,
             "line_min_gap": LINE_MIN_GAP_FRAMES_DEFAULT,
             "line_min_sep": LINE_MIN_SEP_PX_DEFAULT,
             "zone_min_gap": ZONE_MIN_GAP_FRAMES_DEFAULT
         }
-
         v_imgsz = tk.StringVar(value=str(base.get("imgsz","")))
         v_conf  = tk.StringVar(value=str(base.get("conf","")))
         v_iou   = tk.StringVar(value=str(base.get("iou","")))
@@ -614,18 +567,11 @@ class App(tk.Tk):
         v_lgap  = tk.StringVar(value=str(base.get("line_min_gap","")))
         v_lsep  = tk.StringVar(value=str(base.get("line_min_sep","")))
         v_zhgap = tk.StringVar(value=str(base.get("zone_min_gap","")))
-
-        add_row("imgsz", v_imgsz)
-        add_row("conf", v_conf)
-        add_row("iou", v_iou)
-        add_row("frame_skip", v_skip)
-        add_row("track_buffer", v_buf)
-        add_row("match_thresh", v_match)
-        add_row("min_hits", v_hits)
-        add_row("line_min_gap_frames", v_lgap)
-        add_row("line_min_sep_px", v_lsep)
+        add_row("imgsz", v_imgsz); add_row("conf", v_conf); add_row("iou", v_iou)
+        add_row("frame_skip", v_skip); add_row("track_buffer", v_buf)
+        add_row("match_thresh", v_match); add_row("min_hits", v_hits)
+        add_row("line_min_gap_frames", v_lgap); add_row("line_min_sep_px", v_lsep)
         add_row("zone_min_gap_frames", v_zhgap)
-
         def apply():
             try:
                 cur = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
@@ -650,16 +596,13 @@ class App(tk.Tk):
                 win.destroy()
             except Exception as e:
                 messagebox.showerror("Adv", str(e))
-
         def reset():
             self.advanced_override = False
             self._log("[ADV] Przywrócono preset z suwaka.")
             win.destroy()
-
         tk.Button(win, text="Zastosuj", command=apply).pack(side="left", padx=8, pady=8)
         tk.Button(win, text="Przywróć preset", command=reset).pack(side="left", padx=8, pady=8)
 
-    # ==== ABORT ====
     def abort(self):
         self.abort_event.set()
         self._set_progress(None, "Przerywam…")
@@ -676,7 +619,6 @@ class App(tk.Tk):
                 ))
         threading.Thread(target=_wait_and_reset, daemon=True).start()
 
-    # ==== START ====
     def start(self):
         try:
             if self.btn_start['state'] == "disabled": return
@@ -719,7 +661,6 @@ class App(tk.Tk):
             self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled")
             messagebox.showerror("Błąd", str(e))
 
-    # ==== GŁÓWNY WORKER ====
     def _run(self, videos, outp: Path, selected_idx):
         t0 = time.time()
         try:
@@ -729,7 +670,6 @@ class App(tk.Tk):
             cnt_dir  = ensure_dir(outp / "counters")
             temp_dir = ensure_dir(outp / "temp")
 
-            # parametry
             p = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY]).copy()
             if self.advanced_override:
                 p.update(self.adv_params)
@@ -753,7 +693,6 @@ class App(tk.Tk):
                 if self.abort_event.is_set(): break
                 self._log(f"► Wideo {vi+1}/{len(videos)}: {vid_path.name}")
 
-                # otwórz raz, żeby pobrać parametry
                 cap = cv2.VideoCapture(str(vid_path))
                 if not cap.isOpened():
                     self._log(f"[WARN] Nie można otworzyć: {vid_path}")
@@ -763,7 +702,6 @@ class App(tk.Tk):
                 W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
                 H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
 
-                # pobierz 1. klatkę do edytora konfiguracji liczników
                 ret, first_frame = cap.read()
                 cap.release()
                 if not ret or first_frame is None:
@@ -773,17 +711,16 @@ class App(tk.Tk):
                 default_cfg_path = cnt_dir / f"{vid_path.stem}.json"
                 editor = CounterEditor(self, first_frame, default_cfg_path=default_cfg_path)
                 self.wait_window(editor)
-                lines_cfg = editor.lines[:]   # [{name, a, b}]
-                zones_cfg = editor.zones[:]   # [{name, pts}]
+                lines_cfg = editor.lines[:]
+                zones_cfg = editor.zones[:]
 
-                # writer (kolizje nazw); dopasuj FPS do stride (zachowujemy normalną prędkość)
                 fps_out = max(1.0, fps / float(stride))
                 writer, out_video_path = open_video_writer_collision(vids_dir / f"{vid_path.stem}_annotated.mp4", W, H, fps_out)
                 if not writer or not writer.isOpened():
                     self._log(f"[ERR] Nie można otworzyć VideoWriter dla: {vid_path.name}")
                     continue
 
-                # Przygotuj tracker-konfig (tymczasowy yaml)
+                # --- TRACKER YAML (poprawka: fuse_score & with_reid) ---
                 tracker_yaml = (temp_dir / f"{tracker_kind}.yaml")
                 with open(tracker_yaml, "w", encoding="utf-8") as f:
                     if tracker_kind == "botsort":
@@ -798,6 +735,8 @@ gmc_method: none
 proximity_thresh: 0.5
 appearance_thresh: 0.25
 min_hits: {min_hits}
+fuse_score: True
+with_reid: False
 """
                         )
                     else:
@@ -810,10 +749,10 @@ track_buffer: {track_buffer}
 match_thresh: {match_thresh}
 min_box_area: 10
 mot20: False
+fuse_score: False
 """
                         )
 
-                # Pętla śledzenia przez Ultralytics (stream=True), z vid_stride
                 generator = self.model.track(
                     source=str(vid_path),
                     stream=True,
@@ -826,11 +765,10 @@ mot20: False
                     tracker=str(tracker_yaml),
                     persist=True,
                     save=False,
-                    vid_stride=stride  # <— przetwarzaj co N-tą klatkę
+                    vid_stride=stride
                 )
 
-                # Stany per track
-                last_centroid = {}  # tid -> (x,y)
+                last_centroid = {}
                 line_states = [{ } for _ in lines_cfg]
                 line_counts = [{"ab":0,"ba":0} for _ in lines_cfg]
                 zone_states = [{ } for _ in zones_cfg]
@@ -844,7 +782,6 @@ mot20: False
                 for res in generator:
                     if self.abort_event.is_set(): break
                     processed += 1
-                    # Szacowany indeks klatki ≈ processed*stride
                     frame_idx = processed * stride - 1
 
                     frame = res.orig_img.copy() if hasattr(res, "orig_img") and res.orig_img is not None else None
@@ -859,19 +796,17 @@ mot20: False
                         cls = res.boxes.cls.cpu().numpy().astype(int)
                         ids = res.boxes.id.cpu().numpy().astype(int) if res.boxes.id is not None else np.array([-1]*len(xyxy))
                         for b,s,c,tid in zip(xyxy, confs, cls, ids):
-                            if tid < 0:  # pomijamy brak ID
+                            if tid < 0:
                                 continue
                             det_boxes.append([float(b[0]), float(b[1]), float(b[2]), float(b[3])])
                             det_confs.append(float(s))
                             det_cids.append(int(c))
                             det_ids.append(int(tid))
 
-                    # centroidy
                     centroids = []
                     for b in det_boxes:
                         cx = 0.5*(b[0]+b[2]); cy = 0.5*(b[1]+b[3]); centroids.append((cx,cy))
 
-                    # Linie + Strefy
                     for (tid, b, s, cid, (cx,cy)) in zip(det_ids, det_boxes, det_confs, det_cids, centroids):
                         # Linie
                         for li, ln in enumerate(lines_cfg):
@@ -912,13 +847,13 @@ mot20: False
 
                         # Strefy
                         for zi, zn in enumerate(zones_cfg):
-                            s = zone_states[zi].get(tid, {"inside": False, "last_change": -9999})
+                            sstate = zone_states[zi].get(tid, {"inside": False, "last_change": -9999})
                             inside_now = point_in_polygon((cx,cy), zn["pts"])
-                            if inside_now != s["inside"]:
-                                if frame_idx - s["last_change"] >= zone_min_gap:
-                                    s["inside"] = inside_now
-                                    s["last_change"] = frame_idx
-                                    zone_states[zi][tid] = s
+                            if inside_now != sstate["inside"]:
+                                if frame_idx - sstate["last_change"] >= zone_min_gap:
+                                    sstate["inside"] = inside_now
+                                    sstate["last_change"] = frame_idx
+                                    zone_states[zi][tid] = sstate
                                     ev = "zone_in" if inside_now else "zone_out"
                                     if inside_now: zone_counts[zi]["in"] += 1
                                     else: zone_counts[zi]["out"] += 1
@@ -934,11 +869,10 @@ mot20: False
                                         "conf": float(s)
                                     })
                             else:
-                                zone_states[zi][tid] = s
+                                zone_states[zi][tid] = sstate
 
                         last_centroid[tid] = (cx,cy)
 
-                    # ====== OVERLAY ======
                     mode = self.overlay_mode.get()
                     if mode == "centroid":
                         for (tid, (cx,cy)) in zip(det_ids, centroids):
@@ -963,13 +897,11 @@ mot20: False
                                 if show_conf: lbl += f" {s:.2f}"
                                 cv2.putText(frame, lbl, (int(x1), max(14, int(y1)-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
 
-                    # rysuj linie i liczniki
                     for li, ln in enumerate(lines_cfg):
                         a = (int(ln["a"][0]), int(ln["a"][1])); b2 = (int(ln["b"][0]), int(ln["b"][1]))
                         cv2.arrowedLine(frame, a, b2, (0,255,255), 3, tipLength=0.08)
                         cv2.putText(frame, f"{ln['name']}  A->B:{line_counts[li]['ab']}  B->A:{line_counts[li]['ba']}",
                                     (min(a[0],b2[0])+6, min(a[1],b2[1])-6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2, cv2.LINE_AA)
-                    # rysuj strefy i liczniki
                     for zi, zn in enumerate(zones_cfg):
                         poly = np.array(zn["pts"], dtype=np.int32)
                         cv2.polylines(frame, [poly], True, (0,165,255), 2)
@@ -979,7 +911,6 @@ mot20: False
 
                     writer.write(frame)
 
-                    # progres
                     if est_total_processed:
                         frac = (processed)/max(1, est_total_processed)
                         eta = self._eta(time.time()-start_time, min(1.0, frac))
@@ -989,7 +920,6 @@ mot20: False
 
                 writer.release()
 
-                # zapisy zdarzeń i sum
                 df = pd.DataFrame(events)
                 ev_path = save_csv_collision(df, ev_dir / f"{vid_path.stem}_events.csv")
                 summary = {
@@ -1001,7 +931,6 @@ mot20: False
                 sum_path = save_json_collision(summary, summ_dir / f"{vid_path.stem}_counts.json")
                 self._log(f"Zapisano: {out_video_path.name}, {ev_path.name}, {Path(sum_path).name}")
 
-            # meta
             meta = {
                 "started_at": t0, "finished_at": time.time(),
                 "params": {
@@ -1030,8 +959,7 @@ mot20: False
             self.btn_start.config(state="normal")
             self.btn_abort.config(state="disabled")
 
-    # ==== helpers ====
-    def _log(self, msg): 
+    def _log(self, msg):
         try: self.log.insert("end", msg+"\n"); self.log.see("end")
         except Exception: pass
 
