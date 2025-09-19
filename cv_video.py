@@ -1,186 +1,30 @@
-import os, json, zipfile, threading, time, math, sys, subprocess, shutil
+# cv_video.py — cienki starter + GUI glue
+from __future__ import annotations
+import threading, sys
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+
 from cv_video_gui import ScrollableFrame, CounterEditor, AppUIMixin
+from cv_video_run import run as core_run
+from cv_video_core import (                         # <-- wszystko z core
+    ensure_dir, device_auto_str, open_video_writer_collision,
+    save_json_collision, save_csv_collision,
+    score_weight_name, find_best_weights, resolve_weights_to_pt,
+    SUPPORTED_VID_EXTS, MODEL_DIRNAME,
+    VIDEO_PRESETS, DEFAULT_QUALITY, DEFAULT_TRACKER,
+    LINE_MIN_GAP_FRAMES_DEFAULT, LINE_MIN_SEP_PX_DEFAULT, ZONE_MIN_GAP_FRAMES_DEFAULT,
+)
 
-
-import cv2
-import numpy as np
-import pandas as pd
-import torch
-from PIL import Image, ImageTk
-
-# === Preferuj lokalne ./_pkgs (gdy uruchamiasz bez bootstrap_env) ===
-PKGS = Path(__file__).parent / "_pkgs"
-if PKGS.exists():
-    sys.path.insert(0, str(PKGS))
-
-# === Lekkie sprawdzenie Ultralytics (YOLOv11 / C3k2) ===
+import cv2, pandas as pd, torch
+from ultralytics import YOLO
 try:
     from ultralytics.nn.modules import block as _ublock
     if not hasattr(_ublock, "C3k2"):
-        raise RuntimeError(
-            "Wykryto Ultralytics bez wsparcia YOLOv11 (brak bloku C3k2). "
-            "Uruchom przez bootstrap_env.py lub zaktualizuj pakiet."
-        )
+        raise RuntimeError("Ultralytics bez wsparcia YOLOv11 (brak C3k2).")
 except Exception as e:
-    try:
-        _root = tk.Tk(); _root.withdraw()
-        messagebox.showerror(
-            "Ultralytics za stare",
-            "Ta aplikacja wymaga Ultralytics z YOLOv11 (blok C3k2).\n\n"
-            "Uruchom przez:\n    python bootstrap_env.py unidrone_video.py\n"
-            "albo użyj lokalnego venv z aktualnym ultralytics.\n\n"
-            f"Szczegóły: {e}"
-        )
-    except Exception:
-        print("Ultralytics check:", e, file=sys.stderr)
-    sys.exit(1)
+    print("Ultralytics check:", e, file=sys.stderr)
 
-from ultralytics import YOLO
-
-try:
-    import supervision as sv
-except Exception:
-    sv = None
-
-# --- Scrollowalny kontener na listę klas ---
-# ===================== STAŁE / PRESETY =====================
-SUPPORTED_VID_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v", ".wmv")
-MODEL_DIRNAME = "models"
-
-VIDEO_PRESETS = {
-    1: {"imgsz": 640,  "conf": 0.50, "iou": 0.60, "frame_skip": 2, "track_buffer": 30, "match_thresh": 0.80, "min_hits": 2},
-    2: {"imgsz": 896,  "conf": 0.55, "iou": 0.55, "frame_skip": 2, "track_buffer": 45, "match_thresh": 0.80, "min_hits": 2},
-    3: {"imgsz": 960,  "conf": 0.60, "iou": 0.50, "frame_skip": 1, "track_buffer": 60, "match_thresh": 0.78, "min_hits": 2},
-    4: {"imgsz": 1280, "conf": 0.65, "iou": 0.50, "frame_skip": 1, "track_buffer": 75, "match_thresh": 0.75, "min_hits": 3},
-    5: {"imgsz": 1280, "conf": 0.70, "iou": 0.45, "frame_skip": 0, "track_buffer": 90, "match_thresh": 0.75, "min_hits": 3},  # ULTRA
-}
-DEFAULT_QUALITY = 5
-DEFAULT_TRACKER = "bytetrack"
-
-LINE_MIN_GAP_FRAMES_DEFAULT = 8
-LINE_MIN_SEP_PX_DEFAULT    = 12
-ZONE_MIN_GAP_FRAMES_DEFAULT = 6
-
-# ===================== UTIL =====================
-def ensure_dir(p: Path) -> Path:
-    p.mkdir(parents=True, exist_ok=True); return p
-
-def device_auto_str() -> str:
-    return "0" if torch.cuda.is_available() else "cpu"
-
-def score_weight_name(p: Path) -> int:
-    name = p.name.lower(); score = 0
-    try: score += int(p.stat().st_size // (1024*1024))
-    except Exception: pass
-    if "x.pt" in name: score += 100
-    if "l.pt" in name: score += 80
-    if "m.pt" in name: score += 60
-    return score
-
-def find_best_weights(models_dir: Path) -> Path | None:
-    cands = list(models_dir.glob("*.pt")) + list(models_dir.glob("*.zip"))
-    if not cands: return None
-    cands.sort(key=score_weight_name, reverse=True); return cands[0]
-
-def resolve_weights_to_pt(path: Path, extract_dir: Path) -> Path:
-    if path.suffix.lower() == ".pt": return path
-    if path.suffix.lower() == ".zip":
-        ensure_dir(extract_dir)
-        with zipfile.ZipFile(path, "r") as z: z.extractall(extract_dir)
-        pts = list(extract_dir.rglob("*.pt"))
-        if not pts: raise RuntimeError("W archiwum .zip nie znaleziono pliku .pt")
-        pts.sort(key=score_weight_name, reverse=True); return pts[0]
-    raise ValueError("Wybierz .pt lub .zip")
-
-def numbered_path(path: Path) -> Path:
-    if not path.exists(): return path
-    stem, suf = path.stem, path.suffix; i = 1
-    while True:
-        cand = path.with_name(f"{stem}_{i}{suf}")
-        if not cand.exists(): return cand
-        i += 1
-
-def open_video_writer_collision(path: Path, w: int, h: int, fps: float) -> (cv2.VideoWriter, Path):
-    out_path = path
-    try:
-        if out_path.exists():
-            try: out_path.unlink()
-            except Exception: pass
-        writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-        if writer.isOpened(): return writer, out_path
-    except Exception:
-        pass
-    out_path = numbered_path(path)
-    writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-    return writer, out_path
-
-def save_json_collision(obj, path: Path) -> Path:
-    try:
-        if path.exists():
-            try: path.unlink()
-            except Exception: pass
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=2)
-        return path
-    except Exception:
-        alt = numbered_path(path)
-        with open(alt, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=2)
-        return alt
-
-def save_csv_collision(df: pd.DataFrame, path: Path) -> Path:
-    try:
-        if path.exists():
-            try: path.unlink()
-            except Exception: pass
-        df.to_csv(path, index=False, encoding="utf-8")
-        return path
-    except Exception:
-        alt = numbered_path(path)
-        df.to_csv(alt, index=False, encoding="utf-8")
-        return alt
-
-# ====== Geometria linii/poligonów ======
-def line_side(a, b, p):
-    return (b[0]-a[0])*(p[1]-a[1]) - (b[1]-a[1])*(p[0]-a[0])
-
-def segments_intersect(p1, p2, q1, q2):
-    def orient(a,b,c):
-        v = (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])
-        if v > 0: return 1
-        if v < 0: return -1
-        return 0
-    def on_seg(a,b,c):
-        return (min(a[0],b[0]) - 1e-6 <= c[0] <= max(a[0],b[0]) + 1e-6 and
-                min(a[1],b[1]) - 1e-6 <= c[1] <= max(a[1],b[1]) + 1e-6)
-    o1 = orient(p1,p2,q1); o2 = orient(p1,p2,q2)
-    o3 = orient(q1,q2,p1); o4 = orient(q1,q2,p2)
-    if o1 != o2 and o3 != o4: return True
-    if o1 == 0 and on_seg(p1,p2,q1): return True
-    if o2 == 0 and on_seg(p1,p2,q2): return True
-    if o3 == 0 and on_seg(q1,q2,p1): return True
-    if o4 == 0 and on_seg(q1,q2,p2): return True
-    return False
-
-def dist_point_to_segment(a, b, p):
-    ax, ay = a; bx, by = b; px, py = p
-    abx, aby = bx-ax, by-ay
-    apx, apy = px-ax, py-ay
-    ab2 = abx*abx + aby*aby
-    if ab2 <= 1e-9: return math.hypot(px-ax, py-ay)
-    t = max(0.0, min(1.0, (apx*abx + apy*aby)/ab2))
-    cx, cy = ax + t*abx, ay + t*aby
-    return math.hypot(px-cx, py-cy)
-
-def point_in_polygon(pt, poly):
-    poly_np = np.array(poly, dtype=np.int32)
-    return cv2.pointPolygonTest(poly_np, pt, False) >= 0
-
-# ===================== EDYTOR KONFIGU Linii/Poligonów =====================
-# ===================== APLIKACJA WIDEO =====================
 class App(AppUIMixin, tk.Tk):
     def __init__(self):
         super().__init__()
@@ -194,7 +38,7 @@ class App(AppUIMixin, tk.Tk):
 
         self.quality = tk.IntVar(value=DEFAULT_QUALITY)
         self.tracker_kind = tk.StringVar(value=DEFAULT_TRACKER)
-        self.overlay_mode = tk.StringVar(value="centroid")  # "centroid"|"boxes"|"boxes_conf"
+        self.overlay_mode = tk.StringVar(value="centroid")
 
         self.model = None; self.names = None; self.class_vars = []
         self.selected_files = []
@@ -222,7 +66,7 @@ class App(AppUIMixin, tk.Tk):
         self.build_ui()
         self._autoload_best_model()
 
-
+    # ---- GUI helpers (używane w mixinie) ----
     def _row_browse(self, parent, label, var, cmd, is_dir=True):
         f = tk.Frame(parent); f.pack(fill="x", pady=3)
         tk.Label(f, text=label, width=26, anchor="w").pack(side="left")
@@ -239,7 +83,7 @@ class App(AppUIMixin, tk.Tk):
 
     def browse_files(self):
         files = filedialog.askopenfilenames(title="Wybierz pliki wideo",
-                                            filetypes=[("Wideo","*.mp4 *.mov *.avi *.mkv *.m4v *.wmv")])
+                                            filetypes=[("Wideo","*.mp4 *.mov *.avi *.mkv *.m4v *.wmv *.mpg *.mpeg *.ts")])
         if files:
             self.selected_files = list(files); self.files_label.config(text=f"Wybrano {len(self.selected_files)} plików")
         else:
@@ -276,10 +120,12 @@ class App(AppUIMixin, tk.Tk):
 
             wp = Path(self.weights_path.get().strip())
             if wp.is_dir():
+                from cv_video_core import find_best_weights
                 best = find_best_weights(wp)
                 if not best: raise FileNotFoundError(f"W {wp} brak .pt/.zip")
                 wp = best
 
+            from cv_video_core import resolve_weights_to_pt
             pt = resolve_weights_to_pt(wp, extract_dir)
             self._log(f"Wczytuję model: {pt}")
             self.model = YOLO(str(pt)); self.names = self.model.names
@@ -315,39 +161,29 @@ class App(AppUIMixin, tk.Tk):
             "line_min_sep": LINE_MIN_SEP_PX_DEFAULT,
             "zone_min_gap": ZONE_MIN_GAP_FRAMES_DEFAULT
         }
-        v_imgsz = tk.StringVar(value=str(base.get("imgsz","")))
-        v_conf  = tk.StringVar(value=str(base.get("conf","")))
-        v_iou   = tk.StringVar(value=str(base.get("iou","")))
-        v_skip  = tk.StringVar(value=str(base.get("frame_skip","")))
-        v_buf   = tk.StringVar(value=str(base.get("track_buffer","")))
-        v_match = tk.StringVar(value=str(base.get("match_thresh","")))
-        v_hits  = tk.StringVar(value=str(base.get("min_hits","")))
-        v_lgap  = tk.StringVar(value=str(base.get("line_min_gap","")))
-        v_lsep  = tk.StringVar(value=str(base.get("line_min_sep","")))
-        v_zhgap = tk.StringVar(value=str(base.get("zone_min_gap","")))
-        add_row("imgsz", v_imgsz); add_row("conf", v_conf); add_row("iou", v_iou)
-        add_row("frame_skip", v_skip); add_row("track_buffer", v_buf)
-        add_row("match_thresh", v_match); add_row("min_hits", v_hits)
-        add_row("line_min_gap_frames", v_lgap); add_row("line_min_sep_px", v_lsep)
-        add_row("zone_min_gap_frames", v_zhgap)
+        def getvar(key): 
+            import tkinter as _tk
+            return _tk.StringVar(value=str(base.get(key,"")))
+        v = {k: getvar(k) for k in ["imgsz","conf","iou","frame_skip","track_buffer","match_thresh","min_hits","line_min_gap","line_min_sep","zone_min_gap"]}
+        for k in v: add_row(k, v[k])
         def apply():
             try:
                 cur = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
-                def get_or(v, cast, key, default):
-                    s = v.get().strip()
+                def get_or(vv, cast, key, default):
+                    s = vv.get().strip()
                     if s != "": return cast(s)
                     return default if key not in cur else cur[key]
                 self.adv_params = {
-                    "imgsz": get_or(v_imgsz, int, "imgsz", 960),
-                    "conf": get_or(v_conf, float, "conf", 0.6),
-                    "iou": get_or(v_iou, float, "iou", 0.5),
-                    "frame_skip": get_or(v_skip, int, "frame_skip", 1),
-                    "track_buffer": get_or(v_buf, int, "track_buffer", 60),
-                    "match_thresh": get_or(v_match, float, "match_thresh", 0.78),
-                    "min_hits": get_or(v_hits, int, "min_hits", 2),
-                    "line_min_gap": int(v_lgap.get()) if v_lgap.get().strip()!="" else LINE_MIN_GAP_FRAMES_DEFAULT,
-                    "line_min_sep": int(v_lsep.get()) if v_lsep.get().strip()!="" else LINE_MIN_SEP_PX_DEFAULT,
-                    "zone_min_gap": int(v_zhgap.get()) if v_zhgap.get().strip()!="" else ZONE_MIN_GAP_FRAMES_DEFAULT,
+                    "imgsz": get_or(v["imgsz"], int, "imgsz", 960),
+                    "conf": get_or(v["conf"], float, "conf", 0.6),
+                    "iou": get_or(v["iou"], float, "iou", 0.5),
+                    "frame_skip": get_or(v["frame_skip"], int, "frame_skip", 1),
+                    "track_buffer": get_or(v["track_buffer"], int, "track_buffer", 60),
+                    "match_thresh": get_or(v["match_thresh"], float, "match_thresh", 0.78),
+                    "min_hits": get_or(v["min_hits"], int, "min_hits", 2),
+                    "line_min_gap": int(v["line_min_gap"].get() or LINE_MIN_GAP_FRAMES_DEFAULT),
+                    "line_min_sep": int(v["line_min_sep"].get() or LINE_MIN_SEP_PX_DEFAULT),
+                    "zone_min_gap": int(v["zone_min_gap"].get() or ZONE_MIN_GAP_FRAMES_DEFAULT),
                 }
                 self.advanced_override = True
                 self._log("[ADV] Zastosowano override.")
@@ -361,6 +197,7 @@ class App(AppUIMixin, tk.Tk):
         tk.Button(win, text="Zastosuj", command=apply).pack(side="left", padx=8, pady=8)
         tk.Button(win, text="Przywróć preset", command=reset).pack(side="left", padx=8, pady=8)
 
+    # --- sterowanie zadaniem ---
     def abort(self):
         self.abort_event.set()
         self._set_progress(None, "Przerywam…")
@@ -388,8 +225,7 @@ class App(AppUIMixin, tk.Tk):
             sources = []
             base_in = None
             if hasattr(self, "src_mode") and self.src_mode.get() == "camera":
-                try:
-                    cam_idx = int(self.cam_index.get().strip())
+                try: cam_idx = int(self.cam_index.get().strip())
                 except Exception:
                     messagebox.showerror("Kamera", "Index kamery musi być liczbą całkowitą.")
                     self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
@@ -409,8 +245,7 @@ class App(AppUIMixin, tk.Tk):
                     if not inp.exists():
                         messagebox.showerror("Wejście", "Wskaż poprawny folder lub pliki.")
                         self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
-                    exts = {".mp4",".mov",".avi",".mkv",".m4v",".wmv",".mpg",".mpeg",".ts"}
-                    sources = sorted([p for p in inp.iterdir() if p.suffix.lower() in exts])
+                    sources = sorted([p for p in inp.iterdir() if p.suffix.lower() in SUPPORTED_VID_EXTS])
                     if not sources:
                         self._log("Brak plików wideo w folderze.")
                         self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
@@ -428,331 +263,21 @@ class App(AppUIMixin, tk.Tk):
 
             out_base = Path(self.output_dir.get().strip()) if self.output_dir.get().strip() else (base_in or Path.cwd())
             outp = ensure_dir(out_base / "results")
+
             self.worker_done.clear()
-            self.worker_thread = threading.Thread(target=self._run, args=(sources, outp, selected_idx), daemon=True)
+            self.worker_thread = threading.Thread(target=core_run, args=(self, sources, outp, selected_idx), daemon=True)
             self.worker_thread.start()
         except Exception as e:
             self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled")
             messagebox.showerror("Błąd", str(e))
 
-    def _run(self, sources, outp: Path, selected_idx):
-        t0 = time.time()
-        try:
-            vids_dir = ensure_dir(outp / "videos")
-            ev_dir   = ensure_dir(outp / "events")
-            summ_dir = ensure_dir(outp / "summary")
-            cnt_dir  = ensure_dir(outp / "counters")
-            temp_dir = ensure_dir(outp / "temp")
-
-            p = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY]).copy()
-            if self.advanced_override:
-                p.update(self.adv_params)
-            imgsz = int(p["imgsz"]); conf = float(p["conf"]); iou = float(p["iou"])
-            frame_skip = int(p["frame_skip"]); stride = max(1, frame_skip + 1)
-            track_buffer = int(p["track_buffer"]); match_thresh = float(p["match_thresh"]); min_hits = int(p["min_hits"])
-            line_min_gap = int(p.get("line_min_gap", LINE_MIN_GAP_FRAMES_DEFAULT))
-            line_min_sep = int(p.get("line_min_sep", LINE_MIN_SEP_PX_DEFAULT))
-            zone_min_gap = int(p.get("zone_min_gap", ZONE_MIN_GAP_FRAMES_DEFAULT))
-            tracker_kind = self.tracker_kind.get()
-
-            device = device_auto_str()
-            id2name = self.model.names if isinstance(self.model.names, dict) else {i:nm for i,nm in enumerate(self.model.names)}
-            select_names = [id2name[i] for i in selected_idx]
-
-            self._log(f"Param: imgsz={imgsz}, conf={conf}, iou={iou}, frame_skip={frame_skip} (stride={stride}), buf={track_buffer}, match={match_thresh}, hits={min_hits}, device={device}")
-            self._log(f"Tracker: {tracker_kind} | Klasy: {', '.join(select_names)}")
-            self._log(f"Histereza: line_gap={line_min_gap}, line_sep={line_min_sep}px, zone_gap={zone_min_gap}")
-
-            for vi, source in enumerate(sources):
-                src_name = (str(source) if not isinstance(source, Path) else source.name)
-                if self.abort_event.is_set(): break
-                self._log(f"► Źródło {vi+1}/{len(sources)}: {src_name}")
-
-                cap = cv2.VideoCapture(source if not isinstance(source, Path) else str(source))
-                if not cap.isOpened():
-                    self._log(f"[WARN] Nie można otworzyć: {src_name}")
-                    continue
-                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) > 0 else None
-                fps = cap.get(cv2.CAP_PROP_FPS); fps = fps if fps and fps>1e-3 else 25.0
-                W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
-                H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
-
-                ret, first_frame = cap.read()
-                cap.release()
-                if not ret or first_frame is None:
-                    self._log(f"[WARN] Brak pierwszej klatki: {src_name}")
-                    continue
-
-                import re as _re
-                base_stem = (source.stem if isinstance(source, Path) else _re.sub(r'[^A-Za-z0-9_]+','_', src_name))
-                default_cfg_path = cnt_dir / f"{base_stem}.json"
-                editor = CounterEditor(self, first_frame, default_cfg_path=default_cfg_path)
-                self.wait_window(editor)
-                lines_cfg = editor.lines[:]
-                zones_cfg = editor.zones[:]
-
-                fps_out = max(1.0, fps / float(stride))
-                writer, out_video_path = open_video_writer_collision(vids_dir / f"{base_stem}_annotated.mp4", W, H, fps_out)
-                if not writer or not writer.isOpened():
-                    self._log(f"[ERR] Nie można otworzyć VideoWriter dla: {src_name}")
-                    continue
-
-                # --- TRACKER YAML (poprawka: fuse_score & with_reid) ---
-                tracker_yaml = (temp_dir / f"{tracker_kind}.yaml")
-                with open(tracker_yaml, "w", encoding="utf-8") as f:
-                    if tracker_kind == "botsort":
-                        f.write(
-f"""tracker_type: botsort
-track_high_thresh: {conf}
-track_low_thresh: {max(conf-0.1, 0.05)}
-new_track_thresh: {conf}
-track_buffer: {track_buffer}
-match_thresh: {match_thresh}
-gmc_method: none
-proximity_thresh: 0.5
-appearance_thresh: 0.25
-min_hits: {min_hits}
-fuse_score: True
-with_reid: False
-"""
-                        )
-                    else:
-                        f.write(
-f"""tracker_type: bytetrack
-track_high_thresh: {conf}
-track_low_thresh: {max(conf-0.1, 0.05)}
-new_track_thresh: {conf}
-track_buffer: {track_buffer}
-match_thresh: {match_thresh}
-min_box_area: 10
-mot20: False
-fuse_score: False
-"""
-                        )
-
-                generator = self.model.track(
-                    source=(source if not isinstance(source, Path) else str(source)),
-                    stream=True,
-                    verbose=False,
-                    imgsz=imgsz,
-                    conf=conf,
-                    iou=iou,
-                    device=device,
-                    classes=selected_idx,
-                    tracker=str(tracker_yaml),
-                    persist=True,
-                    save=False,
-                    vid_stride=stride
-                )
-
-                last_centroid = {}
-                line_states = [{ } for _ in lines_cfg]
-                line_counts = [{"ab":0,"ba":0} for _ in lines_cfg]
-                zone_states = [{ } for _ in zones_cfg]
-                zone_counts = [{"in":0,"out":0} for _ in zones_cfg]
-                events = []
-
-                processed = 0
-                start_time = time.time()
-                est_total_processed = (total_frames // stride) if total_frames else None
-
-                for res in generator:
-                    if self.abort_event.is_set(): break
-                    processed += 1
-                    frame_idx = processed * stride - 1
-
-                    frame = res.orig_img.copy() if hasattr(res, "orig_img") and res.orig_img is not None else None
-                    if frame is None:
-                        try: frame = res.plot()
-                        except Exception: continue
-
-                    det_boxes, det_confs, det_cids, det_ids = [], [], [], []
-                    if res.boxes is not None and len(res.boxes) > 0:
-                        xyxy = res.boxes.xyxy.cpu().numpy()
-                        confs = res.boxes.conf.cpu().numpy()
-                        cls = res.boxes.cls.cpu().numpy().astype(int)
-                        ids = res.boxes.id.cpu().numpy().astype(int) if res.boxes.id is not None else np.array([-1]*len(xyxy))
-                        for b,s,c,tid in zip(xyxy, confs, cls, ids):
-                            if tid < 0:
-                                continue
-                            det_boxes.append([float(b[0]), float(b[1]), float(b[2]), float(b[3])])
-                            det_confs.append(float(s))
-                            det_cids.append(int(c))
-                            det_ids.append(int(tid))
-
-                    centroids = []
-                    for b in det_boxes:
-                        cx = 0.5*(b[0]+b[2]); cy = 0.5*(b[1]+b[3]); centroids.append((cx,cy))
-
-                    for (tid, b, s, cid, (cx,cy)) in zip(det_ids, det_boxes, det_confs, det_cids, centroids):
-                        # Linie
-                        for li, ln in enumerate(lines_cfg):
-                            a = (ln["a"][0], ln["a"][1]); b2 = (ln["b"][0], ln["b"][1])
-                            st = line_states[li].get(tid, {"last_side": None, "last_frame": -9999})
-                            prev_side = st["last_side"]
-                            cur_side = line_side(a, b2, (cx,cy))
-                            crossed = False; direction = None
-                            if prev_side is not None:
-                                prev_c = last_centroid.get(tid, (cx,cy))
-                                if segments_intersect(prev_c, (cx,cy), a, b2):
-                                    if prev_side < 0 and cur_side > 0:
-                                        direction = "ab"
-                                    elif prev_side > 0 and cur_side < 0:
-                                        direction = "ba"
-                                    if direction is not None:
-                                        if frame_idx - st["last_frame"] >= line_min_gap:
-                                            if dist_point_to_segment(a, b2, (cx,cy)) >= line_min_sep:
-                                                crossed = True
-                            st["last_side"] = cur_side
-                            if crossed:
-                                st["last_frame"] = frame_idx
-                                line_states[li][tid] = st
-                                line_counts[li][direction] += 1
-                                events.append({
-                                    "video": src_name,
-                                    "frame": int(frame_idx),
-                                    "time_sec": float(frame_idx / max(1.0, fps)),
-                                    "track_id": int(tid),
-                                    "class_id": int(cid),
-                                    "class_name": self.names[cid] if isinstance(self.names, dict) else self.names[cid],
-                                    "event_type": f"line_{direction}",
-                                    "counter_name": ln["name"],
-                                    "conf": float(s)
-                                })
-                            else:
-                                line_states[li][tid] = st
-
-                        # Strefy
-                        for zi, zn in enumerate(zones_cfg):
-                            sstate = zone_states[zi].get(tid, {"inside": False, "last_change": -9999})
-                            inside_now = point_in_polygon((cx,cy), zn["pts"])
-                            if inside_now != sstate["inside"]:
-                                if frame_idx - sstate["last_change"] >= zone_min_gap:
-                                    sstate["inside"] = inside_now
-                                    sstate["last_change"] = frame_idx
-                                    zone_states[zi][tid] = sstate
-                                    ev = "zone_in" if inside_now else "zone_out"
-                                    if inside_now: zone_counts[zi]["in"] += 1
-                                    else: zone_counts[zi]["out"] += 1
-                                    events.append({
-                                        "video": src_name,
-                                        "frame": int(frame_idx),
-                                        "time_sec": float(frame_idx / max(1.0, fps)),
-                                        "track_id": int(tid),
-                                        "class_id": int(cid),
-                                        "class_name": self.names[cid] if isinstance(self.names, dict) else self.names[cid],
-                                        "event_type": ev,
-                                        "counter_name": zn["name"],
-                                        "conf": float(s)
-                                    })
-                            else:
-                                zone_states[zi][tid] = sstate
-
-                        last_centroid[tid] = (cx,cy)
-
-                    mode = self.overlay_mode.get()
-                    if mode == "centroid":
-                        for (tid, (cx,cy)) in zip(det_ids, centroids):
-                            cv2.circle(frame, (int(cx), int(cy)), 4, (0,255,0), -1, lineType=cv2.LINE_AA)
-                            cv2.putText(frame, f"ID {tid}", (int(cx)+6, int(cy)-6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
-                    elif mode in ("boxes", "boxes_conf"):
-                        show_conf = (mode == "boxes_conf")
-                        if sv is not None:
-                            det = sv.Detections(xyxy=np.array(det_boxes, dtype=np.float32),
-                                                confidence=np.array(det_confs, dtype=np.float32),
-                                                class_id=np.array(det_cids, dtype=int),
-                                                tracker_id=np.array(det_ids, dtype=int))
-                            labels = []
-                            for s,c,tid in zip(det_confs, det_cids, det_ids):
-                                nm = self.names[c] if isinstance(self.names, dict) else self.names[c]
-                                labels.append(f"{nm} ID{tid}" + (f" {s:.2f}" if show_conf else ""))
-                            try:
-                                frame = sv.BoxAnnotator(thickness=2).annotate(frame, det, labels=labels)
-                            except TypeError:
-                                # fallback for supervision without 'labels' kwarg
-                                frame = sv.BoxAnnotator(thickness=2).annotate(frame, det)
-                            try:
-                                for (x1,y1,x2,y2), _lab in zip(det.xyxy, labels):
-                                    x1,y1 = int(x1), int(y1)
-                                    cv2.putText(frame, str(_lab), (x1, max(14, y1-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
-                            except Exception:
-                                pass
-                        else:
-                            for (x1,y1,x2,y2), s, c, tid in zip(det_boxes, det_confs, det_cids, det_ids):
-                                cv2.rectangle(frame, (int(x1),int(y1)), (int(x2),int(y2)), (0,255,0), 2)
-                                lbl = f"ID{tid} {(self.names[c] if isinstance(self.names, dict) else self.names[c])}"
-                                if show_conf: lbl += f" {s:.2f}"
-                                cv2.putText(frame, lbl, (int(x1), max(14, int(y1)-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
-
-                    for li, ln in enumerate(lines_cfg):
-                        a = (int(ln["a"][0]), int(ln["a"][1])); b2 = (int(ln["b"][0]), int(ln["b"][1]))
-                        cv2.arrowedLine(frame, a, b2, (0,255,255), 3, tipLength=0.08)
-                        cv2.putText(frame, f"{ln['name']}  A->B:{line_counts[li]['ab']}  B->A:{line_counts[li]['ba']}",
-                                    (min(a[0],b2[0])+6, min(a[1],b2[1])-6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2, cv2.LINE_AA)
-                    for zi, zn in enumerate(zones_cfg):
-                        poly = np.array(zn["pts"], dtype=np.int32)
-                        cv2.polylines(frame, [poly], True, (0,165,255), 2)
-                        cx = int(np.mean(poly[:,0])); cy = int(np.mean(poly[:,1]))
-                        cv2.putText(frame, f"{zn['name']} IN:{zone_counts[zi]['in']} OUT:{zone_counts[zi]['out']}",
-                                    (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,165,255), 2, cv2.LINE_AA)
-
-                    writer.write(frame)
-
-                    if est_total_processed:
-                        frac = (processed)/max(1, est_total_processed)
-                        eta = self._eta(time.time()-start_time, min(1.0, frac))
-                        self._set_progress(frac*100.0, f"{src_name} — przetw. {processed}/{est_total_processed} klatek — stride {stride} — ETA {eta}")
-                    else:
-                        self._set_progress(None, f"{src_name} — przetw. {processed} — stride {stride}")
-
-                writer.release()
-
-                df = pd.DataFrame(events)
-                ev_path = save_csv_collision(df, ev_dir / f"{base_stem}_events.csv")
-                summary = {
-                    "video": src_name,
-                    "lines": [{"name": ln["name"], "A_to_B": line_counts[i]["ab"], "B_to_A": line_counts[i]["ba"]} for i,ln in enumerate(lines_cfg)],
-                    "zones": [{"name": zn["name"], "IN": zone_counts[i]["in"], "OUT": zone_counts[i]["out"]} for i,zn in enumerate(zones_cfg)],
-                    "total_events": int(len(events))
-                }
-                sum_path = save_json_collision(summary, summ_dir / f"{base_stem}_counts.json")
-                self._log(f"Zapisano: {out_video_path.name}, {ev_path.name}, {Path(sum_path).name}")
-
-            meta = {
-                "started_at": t0, "finished_at": time.time(),
-                "params": {
-                    "quality": int(self.quality.get()) if not self.advanced_override else "ADV",
-                    **(VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])),
-                    **(self.adv_params if self.advanced_override else {}),
-                    "device_auto": device, "tracker": self.tracker_kind.get(),
-                    "overlay_mode": self.overlay_mode.get()
-                },
-                "selected_classes": [self.names[i] if isinstance(self.names, dict) else self.names[i] for i in selected_idx],
-                "output_dir": str(outp)
-            }
-            save_json_collision(meta, outp / "run_metadata.json")
-
-            if self.abort_event.is_set():
-                self._set_progress(None, "Przerwano.")
-                self._log("=== PRZERWANO przez użytkownika ===")
-            else:
-                self._set_progress(100.0, "Gotowe.")
-                self._log(f"Zakończono. Wyniki: {outp}")
-
-        except Exception as e:
-            self._log(f"[BŁĄD] {e}")
-        finally:
-            self.worker_done.set()
-            self.btn_start.config(state="normal")
-            self.btn_abort.config(state="disabled")
-
+    # --- log / progress ---
     def _log(self, msg):
         try: self.log.insert("end", msg+"\n"); self.log.see("end")
         except Exception: pass
 
     def _set_progress(self, percent: float|None, text: str):
         def _upd():
-            # Switch progressbar mode depending on 'percent'
             try:
                 if percent is None:
                     if not getattr(self, "_progress_indeterminate", False):
@@ -778,6 +303,5 @@ fuse_score: False
         m = int(remain // 60); s = int(remain % 60)
         return f"{m:02d}:{s:02d}"
 
-# ===================== MAIN =====================
 if __name__ == "__main__":
     app = App(); app.mainloop()
