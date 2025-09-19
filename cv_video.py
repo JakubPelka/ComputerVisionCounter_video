@@ -71,6 +71,15 @@ class App(AppUIMixin, tk.Tk):
         self._preview_win = None
         self._preview_lbl = None
         self._preview_imgtk = None
+        
+        self.preview_enabled = tk.BooleanVar(value=True)
+        self.trace_enabled   = tk.BooleanVar(value=True)
+        self.trace_len       = tk.IntVar(value=24)
+        self.anchor_mode     = tk.StringVar(value="center")
+        self.preview_enabled = tk.BooleanVar(value=True)
+        self.trace_enabled   = tk.BooleanVar(value=True)
+        self.ghost_margin    = tk.IntVar(value=12)
+
 
         self.build_ui()
         self._autoload_best_model()
