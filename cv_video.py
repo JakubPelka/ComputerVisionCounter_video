@@ -64,6 +64,7 @@ class App(AppUIMixin, tk.Tk):
         self.abort_event = threading.Event()
         self.worker_done = threading.Event()
         self.worker_thread = None
+        self._progress_indeterminate = False  # <— flaga trybu "indeterminate"
 
         # osobne okno podglądu
         self.preview_enabled = tk.BooleanVar(value=True)
@@ -212,13 +213,20 @@ class App(AppUIMixin, tk.Tk):
                 if self.worker_thread is not None:
                     self.worker_done.wait(timeout=3.0)
             finally:
-                self.after(0, lambda: (
-                    self.progress_var.set(0.0),
-                    self.progress_label.set("Przerwano. Gotowe."),
-                    self.btn_start.config(state="normal"),
-                    self.btn_abort.config(state="disabled"),
+                def _reset_ui():
+                    # zatrzymaj indeterminate i przywróć determinate
+                    try:
+                        self.progressbar.stop()
+                        self.progressbar.config(mode="determinate")
+                        self._progress_indeterminate = False
+                    except Exception:
+                        pass
+                    self.progress_var.set(0.0)
+                    self.progress_label.set("Przerwano. Gotowe.")
+                    self.btn_start.config(state="normal")
+                    self.btn_abort.config(state="disabled")
                     self._destroy_preview_window()
-                ))
+                self.after(0, _reset_ui)
         threading.Thread(target=_wait_and_reset, daemon=True).start()
 
     def start(self):

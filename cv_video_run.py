@@ -55,14 +55,12 @@ def _make_bytetrack(conf: float, track_buffer: int, match_thresh: float, min_hit
     try:
         params = inspect.signature(sv.ByteTrack.__init__).parameters
     except Exception:
-        # very old supervision?
         try:
             return sv.ByteTrack()
         except Exception:
             return None
 
     kwargs = {}
-    # common in many versions
     if "track_thresh" in params:
         kwargs["track_thresh"] = max(0.05, min(conf, 0.99))
     if "track_buffer" in params:
@@ -77,7 +75,6 @@ def _make_bytetrack(conf: float, track_buffer: int, match_thresh: float, min_hit
     try:
         return sv.ByteTrack(**kwargs)
     except TypeError:
-        # last resort: call without kwargs
         try:
             return sv.ByteTrack()
         except Exception:
@@ -173,7 +170,7 @@ def run(app, sources, outp: Path, selected_idx):
         frame_skip = int(p["frame_skip"]); stride = max(1, frame_skip + 1)
         track_buffer = int(p["track_buffer"]); match_thresh = float(p["match_thresh"]); min_hits = int(p["min_hits"])
         line_min_gap = int(p.get("line_min_gap", LINE_MIN_GAP_FRAMES_DEFAULT))
-        zone_min_gap = int(p.get("zone_min_gap", ZONE_MIN_GAP_FRAMES_DEFAULT))  # (nieużyty osobno, używamy line_min_gap jako histerezy)
+        zone_min_gap = int(p.get("zone_min_gap", ZONE_MIN_GAP_FRAMES_DEFAULT))  # (nieużyty osobno)
         tracker_kind = app.tracker_kind.get()
 
         device = device_auto_str()
@@ -237,14 +234,20 @@ def run(app, sources, outp: Path, selected_idx):
             trails = {}
             last_seen = {}
 
+            # „miękki reset” – gdy ID zniknie na chwilę, resetujemy jego stan,
+            # żeby ponowne wejście/liczenie było możliwe natychmiast.
+            missed = {}  # tid -> kolejne klatki bez widoczności
+            RESET_MISSED = max(3, stride * 2)
+
             # progress
             processed = 1  # już pobraliśmy 1 klatkę dla edytora
             frame_idx = 0
             start_time = time.time()
             est_total_processed = (total_frames // stride) if total_frames else None
+
             # od razu przetwórz pierwszą, skoro ją mamy (z zachowaniem stride)
             def _handle_frame(frame, frame_idx):
-                nonlocal tracker, trails
+                nonlocal tracker, trails, missed
                 # detection
                 res = app.model(frame, imgsz=imgsz, conf=conf, iou=iou, device=device, classes=selected_idx, verbose=False)[0]
                 det_boxes, det_confs, det_cids, det_ids = [], [], [], []
@@ -275,14 +278,14 @@ def run(app, sources, outp: Path, selected_idx):
                             det_cids.append(int(c))
                             det_ids.append(int(i))
 
-                # counting
+                # --- liczenie ---
                 _process_frame_counting(app, frame_idx, fps, app.names,
                                         lines_cfg, zones_cfg,
                                         det_boxes, det_confs, det_cids, det_ids,
                                         last_centroid, line_states, line_counts, zone_states, zone_counts, events,
                                         line_min_gap)
 
-                # trails + last_seen
+                # --- trails + last_seen ---
                 for tid, b in zip(det_ids, det_boxes):
                     cx = int(0.5*(b[0]+b[2])); cy = int(0.5*(b[1]+b[3]))
                     dq = trails.get(tid)
@@ -292,7 +295,27 @@ def run(app, sources, outp: Path, selected_idx):
                     dq.append((cx, cy))
                     last_seen[tid] = frame_idx
 
-                # purge stale tracks (żeby po powrocie zliczyć ponownie)
+                # --- miękki reset po krótkim zniknięciu ---
+                present = set(det_ids)
+                # aktualizacja liczników „missed”
+                for tid in list(missed.keys()):
+                    if tid in present: missed[tid] = 0
+                    else: missed[tid] += 1
+                for tid in present:
+                    if tid not in missed: missed[tid] = 0
+
+                # resetuj stan po krótkiej przerwie (nie doliczamy OUT – to nie jest wyjście ze strefy, tylko utrata FOV)
+                for tid, m in list(missed.items()):
+                    if m >= RESET_MISSED:
+                        for zi in range(len(zones_cfg)):
+                            zone_states[zi][tid] = {"inside": False, "last_change": frame_idx}
+                        for li in range(len(lines_cfg)):
+                            line_states[li][tid] = {"last_side": None, "last_frame": -9999}
+                        if tid in last_centroid: del last_centroid[tid]
+                        if tid in trails: del trails[tid]
+                        missed[tid] = 0
+
+                # --- czyszczenie starych śmieci (gdy ID dawno nie widziane) ---
                 stale_thr = track_buffer + 5*stride
                 for li in range(len(lines_cfg)):
                     for tid in list(line_states[li].keys()):
@@ -309,7 +332,7 @@ def run(app, sources, outp: Path, selected_idx):
                     if frame_idx - last_seen.get(tid, -10**9) > stale_thr:
                         del trails[tid]
 
-                # overlay + preview
+                # --- overlay + preview ---
                 draw_detections(frame, det_boxes, det_confs, det_cids, det_ids, app.names, app.overlay_mode.get())
                 draw_counters(frame, lines_cfg, line_counts, zones_cfg, zone_counts, trails)
                 writer.write(frame)
@@ -384,6 +407,15 @@ def run(app, sources, outp: Path, selected_idx):
     except Exception as e:
         app._log(f"[BŁĄD] {e}")
     finally:
+        # dodatkowe „wyciszenie” paska — na wypadek przerwania w trakcie indeterminate
+        try:
+            app.after(0, lambda: (
+                app.progressbar.stop(),
+                app.progressbar.config(mode="determinate"),
+                setattr(app, "_progress_indeterminate", False)
+            ))
+        except Exception:
+            pass
         app.worker_done.set()
         app.btn_start.config(state="normal")
         app.btn_abort.config(state="disabled")
