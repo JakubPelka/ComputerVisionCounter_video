@@ -238,7 +238,6 @@ class AppUIMixin:
         self.src_mode = tk.StringVar(value="files")
         self.cam_index = tk.StringVar(value="0")
         self.url_input = tk.StringVar(value="")
-
         def _src_toggle(*_):
             mf = self.src_mode.get()
             cam_ent.config(state=("normal" if mf=="camera" else "disabled"))
@@ -286,9 +285,18 @@ class AppUIMixin:
         self.progressbar.pack(fill="x", side="left", expand=True)
         tk.Label(pf, textvariable=self.progress_label, width=36, anchor="w").pack(side="left", padx=6)
 
+        # --- Podgląd na żywo ---
+        pvf = tk.LabelFrame(frm, text="Podgląd na żywo")
+        pvf.pack(fill="both", expand=False, pady=(4, 4))
+        top = tk.Frame(pvf); top.pack(fill="x")
+        self.preview_enabled = tk.BooleanVar(value=True)
+        tk.Checkbutton(top, text="Włącz podgląd", variable=self.preview_enabled).pack(side="left", padx=6)
+        self.preview_label = tk.Label(pvf, anchor="center")
+        self.preview_label.pack(fill="both", expand=True, padx=6, pady=6)
+
         # --- Log ---
         logf = tk.Frame(frm); logf.pack(fill="both", expand=True)
         self.log = tk.Text(logf, height=10, state="normal"); self.log.pack(fill="both", expand=True)
 
-        # Na końcu - inicjalny preset text
         self._update_preset_label()
+

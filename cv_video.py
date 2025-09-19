@@ -1,4 +1,4 @@
-# cv_video.py — cienki starter + GUI glue
+# cv_video.py — starter + GUI glue + podgląd w osobnym oknie
 from __future__ import annotations
 import threading, sys
 from pathlib import Path
@@ -7,7 +7,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from cv_video_gui import ScrollableFrame, CounterEditor, AppUIMixin
 from cv_video_run import run as core_run
-from cv_video_core import (                         # <-- wszystko z core
+from cv_video_core import (
     ensure_dir, device_auto_str, open_video_writer_collision,
     save_json_collision, save_csv_collision,
     score_weight_name, find_best_weights, resolve_weights_to_pt,
@@ -17,6 +17,7 @@ from cv_video_core import (                         # <-- wszystko z core
 )
 
 import cv2, pandas as pd, torch
+from PIL import Image, ImageTk
 from ultralytics import YOLO
 try:
     from ultralytics.nn.modules import block as _ublock
@@ -24,6 +25,7 @@ try:
         raise RuntimeError("Ultralytics bez wsparcia YOLOv11 (brak C3k2).")
 except Exception as e:
     print("Ultralytics check:", e, file=sys.stderr)
+
 
 class App(AppUIMixin, tk.Tk):
     def __init__(self):
@@ -62,6 +64,12 @@ class App(AppUIMixin, tk.Tk):
         self.abort_event = threading.Event()
         self.worker_done = threading.Event()
         self.worker_thread = None
+
+        # osobne okno podglądu
+        self.preview_enabled = tk.BooleanVar(value=True)
+        self._preview_win = None
+        self._preview_lbl = None
+        self._preview_imgtk = None
 
         self.build_ui()
         self._autoload_best_model()
@@ -120,12 +128,10 @@ class App(AppUIMixin, tk.Tk):
 
             wp = Path(self.weights_path.get().strip())
             if wp.is_dir():
-                from cv_video_core import find_best_weights
                 best = find_best_weights(wp)
                 if not best: raise FileNotFoundError(f"W {wp} brak .pt/.zip")
                 wp = best
 
-            from cv_video_core import resolve_weights_to_pt
             pt = resolve_weights_to_pt(wp, extract_dir)
             self._log(f"Wczytuję model: {pt}")
             self.model = YOLO(str(pt)); self.names = self.model.names
@@ -161,14 +167,14 @@ class App(AppUIMixin, tk.Tk):
             "line_min_sep": LINE_MIN_SEP_PX_DEFAULT,
             "zone_min_gap": ZONE_MIN_GAP_FRAMES_DEFAULT
         }
-        def getvar(key): 
+        def getvar(key):
             import tkinter as _tk
             return _tk.StringVar(value=str(base.get(key,"")))
         v = {k: getvar(k) for k in ["imgsz","conf","iou","frame_skip","track_buffer","match_thresh","min_hits","line_min_gap","line_min_sep","zone_min_gap"]}
         for k in v: add_row(k, v[k])
         def apply():
             try:
-                cur = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
+                cur = VIDEO_PRESETS.get(int(self.quality.get()), DEFAULT_QUALITY)
                 def get_or(vv, cast, key, default):
                     s = vv.get().strip()
                     if s != "": return cast(s)
@@ -210,7 +216,8 @@ class App(AppUIMixin, tk.Tk):
                     self.progress_var.set(0.0),
                     self.progress_label.set("Przerwano. Gotowe."),
                     self.btn_start.config(state="normal"),
-                    self.btn_abort.config(state="disabled")
+                    self.btn_abort.config(state="disabled"),
+                    self._destroy_preview_window()
                 ))
         threading.Thread(target=_wait_and_reset, daemon=True).start()
 
@@ -302,6 +309,54 @@ class App(AppUIMixin, tk.Tk):
         remain = max(0.0, total - elapsed_s)
         m = int(remain // 60); s = int(remain % 60)
         return f"{m:02d}:{s:02d}"
+
+    # ========= PREVIEW W OSOBNYM OKNIE =========
+    def _ensure_preview_window(self):
+        if self._preview_win and (self._preview_win.winfo_exists()):
+            return
+        win = tk.Toplevel(self)
+        win.title("Podgląd (LIVE)")
+        win.geometry("900x600")
+        win.protocol("WM_DELETE_WINDOW", lambda: self._destroy_preview_window())
+        lbl = tk.Label(win, anchor="center", bg="#111")
+        lbl.pack(fill="both", expand=True)
+        self._preview_win = win
+        self._preview_lbl = lbl
+
+    def _show_preview_bgr(self, frame_bgr):
+        if not self.preview_enabled.get():
+            return
+        def _do():
+            try:
+                self._ensure_preview_window()
+                frame = frame_bgr
+                h, w = frame.shape[:2]
+                maxw = 880
+                if w > maxw:
+                    r = maxw / w
+                    frame = cv2.resize(frame, (int(maxw), int(h*r)))
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(rgb)
+                imgtk = ImageTk.PhotoImage(image=img)
+                self._preview_imgtk = imgtk
+                self._preview_lbl.config(image=imgtk)
+            except Exception:
+                pass
+        try:
+            self.after(0, _do)
+        except Exception:
+            pass
+
+    def _destroy_preview_window(self):
+        try:
+            if self._preview_win and self._preview_win.winfo_exists():
+                self._preview_win.destroy()
+        except Exception:
+            pass
+        self._preview_win = None
+        self._preview_lbl = None
+        self._preview_imgtk = None
+
 
 if __name__ == "__main__":
     app = App(); app.mainloop()
