@@ -212,58 +212,28 @@ class CounterEditor(tk.Toplevel):
 
 
 
+
+
+
 class AppUIMixin:
     def build_ui(self):
-        frm = tk.Frame(self); frm.pack(fill="both", expand=True, padx=10, pady=10)
+        # Główny kontener
+        frm = tk.Frame(self); frm.pack(fill="both", expand=True, padx=8, pady=6)
 
-        self._row_browse(frm, "Folder z wideo (wejście):", self.input_dir, self.browse_input)
-        files_row = tk.Frame(frm); files_row.pack(fill="x", pady=3)
-        tk.Button(files_row, text="Wybierz pliki wideo…", command=self.browse_files).pack(side="left")
-        self.files_label = tk.Label(files_row, text="— brak —"); self.files_label.pack(side="left", padx=8)
-        tk.Button(files_row, text="Wyczyść wybór", command=self.clear_files).pack(side="left", padx=8)
+        # --- Wejście: folder + (albo) wybór plików ---
+        self._row_browse(frm, "Folder z wideo (wejście):", self.input_dir, self.browse_input, is_dir=True)
+        f_files = tk.Frame(frm); f_files.pack(fill="x", pady=2)
+        tk.Button(f_files, text="Wybierz pliki wideo...", command=self.browse_files).pack(side="left")
+        self.files_label = tk.Label(f_files, text="— brak —"); self.files_label.pack(side="left", padx=8)
+        tk.Button(f_files, text="Wyczyść wybór", command=self.clear_files).pack(side="left", padx=(8,0))
 
-        self._row_browse(frm, "Folder wynikowy (opcjonalnie):", self.output_dir, self.browse_output)
-        tk.Label(frm, text="Wyniki zapiszemy do podfolderu 'results/'. Jeśli nie wskażesz, użyjemy folderu wideo.").pack(anchor="w")
+        # --- Wyjście ---
+        self._row_browse(frm, "Folder wynikowy (opcjonalnie):", self.output_dir, self.browse_output, is_dir=True)
 
+        # --- Wagi ---
         self._row_browse(frm, "Wagi (.pt/.zip):", self.weights_path, self.browse_weights, is_dir=False)
 
-        qf = tk.LabelFrame(frm, text="Jakość (1 = szybciej/słabiej, 5 = ULTRA)")
-        qf.pack(fill="x", pady=6)
-        sc = tk.Scale(qf, from_=1, to=5, orient="horizontal", variable=self.quality, showvalue=True,
-                      command=lambda _=None: self._update_preset_label())
-        sc.pack(side="left", fill="x", expand=True, padx=6)
-        self.preset_label = tk.Label(qf, text=""); self.preset_label.pack(side="left", padx=6)
-        self._update_preset_label()
-
-        vis = tk.LabelFrame(frm, text="Wizualizacja (overlay)")
-        vis.pack(fill="x", pady=6)
-        tk.Radiobutton(vis, text="Centroidy", variable=self.overlay_mode, value="centroid").pack(side="left", padx=6)
-        tk.Radiobutton(vis, text="Boksy", variable=self.overlay_mode, value="boxes").pack(side="left", padx=6)
-        tk.Radiobutton(vis, text="Boksy + conf", variable=self.overlay_mode, value="boxes_conf").pack(side="left", padx=6)
-
-        tk.Label(frm, text="Tracker:").pack(anchor="w")
-        trf = tk.Frame(frm); trf.pack(fill="x")
-        tk.Radiobutton(trf, text="ByteTrack", variable=self.tracker_kind, value="bytetrack").pack(side="left", padx=6)
-        tk.Radiobutton(trf, text="BoT-SORT", variable=self.tracker_kind, value="botsort").pack(side="left", padx=6)
-
-        self.class_frame = tk.LabelFrame(frm, text="Wybór klas (po wczytaniu wag)")
-        self.class_frame.pack(fill="both", expand=True, pady=6)
-        self.classes_scroll = ScrollableFrame(self.class_frame, height=280)
-        self.classes_scroll.pack(fill="both", expand=True)
-
-        act = tk.Frame(frm); act.pack(fill="x", pady=8)
-        self.btn_start = tk.Button(act, text="START", command=self.start); self.btn_start.pack(side="left")
-        tk.Button(act, text="Opcje zaawansowane…", command=self.open_advanced).pack(side="left", padx=8)
-        self.btn_abort = tk.Button(act, text="ABORT", command=self.abort, state="disabled"); self.btn_abort.pack(side="left", padx=10)
-
-        self.log = tk.Text(frm, height=14); self.log.pack(fill="both", expand=True, pady=(6,2))
-
-        pf = tk.Frame(frm); pf.pack(fill="x", pady=4)
-        self.progressbar = ttk.Progressbar(pf, maximum=100.0, variable=self.progress_var)
-        self.progressbar.pack(fill="x")
-        tk.Label(pf, textvariable=self.progress_label, anchor="w").pack(fill="x")
-
-        # Źródło wejściowe: Pliki / Kamera / URL
+        # --- Źródło wejściowe: pliki/kamera/url ---
         srcf = tk.LabelFrame(frm, text="Źródło wejściowe"); srcf.pack(fill="x", pady=4)
         self.src_mode = tk.StringVar(value="files")
         self.cam_index = tk.StringVar(value="0")
@@ -281,5 +251,44 @@ class AppUIMixin:
         url_ent = tk.Entry(srcf, textvariable=self.url_input); url_ent.pack(side="left", fill="x", expand=True, padx=(0,6))
         _src_toggle()
 
+        # --- Jakość (preset) ---
+        qf = tk.Frame(frm); qf.pack(fill="x", pady=4)
+        tk.Label(qf, text="Jakość (=1 szybciej/słabiej, 5 = ULTRA)").pack(side="left")
+        tk.Scale(qf, from_=1, to=5, orient="horizontal", variable=self.quality,
+                 command=lambda *_: self._update_preset_label()).pack(side="left", fill="x", expand=True, padx=8)
+        self.preset_label = tk.Label(qf, text=""); self.preset_label.pack(side="left")
+        self._update_preset_label()
 
+        # --- Overlay ---
+        ov = tk.LabelFrame(frm, text="Wizualizacja (overlay)"); ov.pack(fill="x", pady=4)
+        tk.Radiobutton(ov, text="Centroidy", variable=self.overlay_mode, value="centroid").pack(side="left", padx=6)
+        tk.Radiobutton(ov, text="Boksy", variable=self.overlay_mode, value="boxes").pack(side="left", padx=6)
+        tk.Radiobutton(ov, text="Boksy + conf", variable=self.overlay_mode, value="boxes_conf").pack(side="left", padx=6)
 
+        # --- Tracker ---
+        tr = tk.LabelFrame(frm, text="Tracker:"); tr.pack(fill="x", pady=4)
+        tk.Radiobutton(tr, text="ByteTrack", variable=self.tracker_kind, value="bytetrack").pack(side="left", padx=6)
+        tk.Radiobutton(tr, text="BoT-SORT", variable=self.tracker_kind, value="botsort").pack(side="left", padx=6)
+
+        # --- Lista klas ---
+        lf = tk.LabelFrame(frm, text="Wybór klas (po wczytaniu wag)"); lf.pack(fill="both", expand=True, pady=4)
+        self.classes_scroll = ScrollableFrame(lf); self.classes_scroll.pack(fill="both", expand=True)
+
+        # --- Przyciski + postęp ---
+        bf = tk.Frame(frm); bf.pack(fill="x", pady=6)
+        self.btn_start = tk.Button(bf, text="START", command=self.start); self.btn_start.pack(side="left")
+        tk.Button(bf, text="Opcje zaawansowane…", command=self.open_advanced).pack(side="left", padx=8)
+        self.btn_abort = tk.Button(bf, text="ABORT", command=self.abort, state="disabled"); self.btn_abort.pack(side="left", padx=(8,0))
+
+        pf = tk.Frame(frm); pf.pack(fill="x", pady=(0,4))
+        self.progressbar = ttk.Progressbar(pf, maximum=100.0, variable=self.progress_var, mode="determinate")
+        self._progress_indeterminate = False
+        self.progressbar.pack(fill="x", side="left", expand=True)
+        tk.Label(pf, textvariable=self.progress_label, width=36, anchor="w").pack(side="left", padx=6)
+
+        # --- Log ---
+        logf = tk.Frame(frm); logf.pack(fill="both", expand=True)
+        self.log = tk.Text(logf, height=10, state="normal"); self.log.pack(fill="both", expand=True)
+
+        # Na końcu - inicjalny preset text
+        self._update_preset_label()

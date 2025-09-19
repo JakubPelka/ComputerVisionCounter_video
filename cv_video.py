@@ -1,17 +1,9 @@
 import os, json, zipfile, threading, time, math, sys, subprocess, shutil
 from pathlib import Path
-from env_guard import apply as _env_apply
-try:
-    _ENV = _env_apply(strict_local=True, need_lap=True)
-except Exception as _e:
-    import tkinter as _tk
-    from tkinter import messagebox as _mb
-    _root = _tk.Tk(); _root.withdraw()
-    _mb.showerror('Środowisko', str(_e))
-    raise
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from cv_video_gui import ScrollableFrame, CounterEditor, AppUIMixin
+
 
 import cv2
 import numpy as np
@@ -227,58 +219,9 @@ class App(AppUIMixin, tk.Tk):
         self.worker_done = threading.Event()
         self.worker_thread = None
 
-        self._build_ui()
+        self.build_ui()
         self._autoload_best_model()
 
-    def _build_ui(self):
-        frm = tk.Frame(self); frm.pack(fill="both", expand=True, padx=10, pady=10)
-
-        self._row_browse(frm, "Folder z wideo (wejście):", self.input_dir, self.browse_input)
-        files_row = tk.Frame(frm); files_row.pack(fill="x", pady=3)
-        tk.Button(files_row, text="Wybierz pliki wideo…", command=self.browse_files).pack(side="left")
-        self.files_label = tk.Label(files_row, text="— brak —"); self.files_label.pack(side="left", padx=8)
-        tk.Button(files_row, text="Wyczyść wybór", command=self.clear_files).pack(side="left", padx=8)
-
-        self._row_browse(frm, "Folder wynikowy (opcjonalnie):", self.output_dir, self.browse_output)
-        tk.Label(frm, text="Wyniki zapiszemy do podfolderu 'results/'. Jeśli nie wskażesz, użyjemy folderu wideo.").pack(anchor="w")
-
-        self._row_browse(frm, "Wagi (.pt/.zip):", self.weights_path, self.browse_weights, is_dir=False)
-
-        qf = tk.LabelFrame(frm, text="Jakość (1 = szybciej/słabiej, 5 = ULTRA)")
-        qf.pack(fill="x", pady=6)
-        sc = tk.Scale(qf, from_=1, to=5, orient="horizontal", variable=self.quality, showvalue=True,
-                      command=lambda _=None: self._update_preset_label())
-        sc.pack(side="left", fill="x", expand=True, padx=6)
-        self.preset_label = tk.Label(qf, text=""); self.preset_label.pack(side="left", padx=6)
-        self._update_preset_label()
-
-        vis = tk.LabelFrame(frm, text="Wizualizacja (overlay)")
-        vis.pack(fill="x", pady=6)
-        tk.Radiobutton(vis, text="Centroidy", variable=self.overlay_mode, value="centroid").pack(side="left", padx=6)
-        tk.Radiobutton(vis, text="Boksy", variable=self.overlay_mode, value="boxes").pack(side="left", padx=6)
-        tk.Radiobutton(vis, text="Boksy + conf", variable=self.overlay_mode, value="boxes_conf").pack(side="left", padx=6)
-
-        tk.Label(frm, text="Tracker:").pack(anchor="w")
-        trf = tk.Frame(frm); trf.pack(fill="x")
-        tk.Radiobutton(trf, text="ByteTrack", variable=self.tracker_kind, value="bytetrack").pack(side="left", padx=6)
-        tk.Radiobutton(trf, text="BoT-SORT", variable=self.tracker_kind, value="botsort").pack(side="left", padx=6)
-
-        self.class_frame = tk.LabelFrame(frm, text="Wybór klas (po wczytaniu wag)")
-        self.class_frame.pack(fill="both", expand=True, pady=6)
-        self.classes_scroll = ScrollableFrame(self.class_frame, height=280)
-        self.classes_scroll.pack(fill="both", expand=True)
-
-        act = tk.Frame(frm); act.pack(fill="x", pady=8)
-        self.btn_start = tk.Button(act, text="START", command=self.start); self.btn_start.pack(side="left")
-        tk.Button(act, text="Opcje zaawansowane…", command=self.open_advanced).pack(side="left", padx=8)
-        self.btn_abort = tk.Button(act, text="ABORT", command=self.abort, state="disabled"); self.btn_abort.pack(side="left", padx=10)
-
-        self.log = tk.Text(frm, height=14); self.log.pack(fill="both", expand=True, pady=(6,2))
-
-        pf = tk.Frame(frm); pf.pack(fill="x", pady=4)
-        self.progressbar = ttk.Progressbar(pf, maximum=100.0, variable=self.progress_var)
-        self.progressbar.pack(fill="x")
-        tk.Label(pf, textvariable=self.progress_label, anchor="w").pack(fill="x")
 
     def _row_browse(self, parent, label, var, cmd, is_dir=True):
         f = tk.Frame(parent); f.pack(fill="x", pady=3)
@@ -442,20 +385,36 @@ class App(AppUIMixin, tk.Tk):
             self.btn_abort.config(state="normal")
             self._set_progress(0.0, "Przygotowuję…")
 
-            videos = []
-            if self.selected_files:
-                videos = [Path(p) for p in self.selected_files]
-                base_in = videos[0].parent
+            sources = []
+            base_in = None
+            if hasattr(self, "src_mode") and self.src_mode.get() == "camera":
+                try:
+                    cam_idx = int(self.cam_index.get().strip())
+                except Exception:
+                    messagebox.showerror("Kamera", "Index kamery musi być liczbą całkowitą.")
+                    self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
+                sources = [cam_idx]
+            elif hasattr(self, "src_mode") and self.src_mode.get() == "url":
+                url = self.url_input.get().strip()
+                if not url:
+                    messagebox.showerror("URL", "Podaj RTSP/HTTP URL strumienia.")
+                    self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
+                sources = [url]
             else:
-                inp = Path(self.input_dir.get().strip())
-                if not inp.exists():
-                    messagebox.showerror("Wejście", "Wskaż poprawny folder lub pliki.")
-                    self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
-                videos = sorted([p for p in inp.iterdir() if p.suffix.lower() in SUPPORTED_VID_EXTS])
-                if not videos:
-                    self._log("Brak plików wideo w folderze.")
-                    self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
-                base_in = inp
+                if self.selected_files:
+                    sources = [Path(p) for p in self.selected_files]
+                    base_in = sources[0].parent if sources and isinstance(sources[0], Path) else None
+                else:
+                    inp = Path(self.input_dir.get().strip())
+                    if not inp.exists():
+                        messagebox.showerror("Wejście", "Wskaż poprawny folder lub pliki.")
+                        self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
+                    exts = {".mp4",".mov",".avi",".mkv",".m4v",".wmv",".mpg",".mpeg",".ts"}
+                    sources = sorted([p for p in inp.iterdir() if p.suffix.lower() in exts])
+                    if not sources:
+                        self._log("Brak plików wideo w folderze.")
+                        self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
+                    base_in = inp
 
             if self.model is None:
                 self.load_model_and_classes()
@@ -467,16 +426,16 @@ class App(AppUIMixin, tk.Tk):
                 messagebox.showwarning("Klasy", "Zaznacz co najmniej jedną klasę.")
                 self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
 
-            out_base = Path(self.output_dir.get().strip()) if self.output_dir.get().strip() else base_in
+            out_base = Path(self.output_dir.get().strip()) if self.output_dir.get().strip() else (base_in or Path.cwd())
             outp = ensure_dir(out_base / "results")
             self.worker_done.clear()
-            self.worker_thread = threading.Thread(target=self._run, args=(videos, outp, selected_idx), daemon=True)
+            self.worker_thread = threading.Thread(target=self._run, args=(sources, outp, selected_idx), daemon=True)
             self.worker_thread.start()
         except Exception as e:
             self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled")
             messagebox.showerror("Błąd", str(e))
 
-    def _run(self, videos, outp: Path, selected_idx):
+    def _run(self, sources, outp: Path, selected_idx):
         t0 = time.time()
         try:
             vids_dir = ensure_dir(outp / "videos")
@@ -504,13 +463,14 @@ class App(AppUIMixin, tk.Tk):
             self._log(f"Tracker: {tracker_kind} | Klasy: {', '.join(select_names)}")
             self._log(f"Histereza: line_gap={line_min_gap}, line_sep={line_min_sep}px, zone_gap={zone_min_gap}")
 
-            for vi, vid_path in enumerate(videos):
+            for vi, source in enumerate(sources):
+                src_name = (str(source) if not isinstance(source, Path) else source.name)
                 if self.abort_event.is_set(): break
-                self._log(f"► Wideo {vi+1}/{len(videos)}: {vid_path.name}")
+                self._log(f"► Źródło {vi+1}/{len(sources)}: {src_name}")
 
-                cap = cv2.VideoCapture(str(vid_path))
+                cap = cv2.VideoCapture(source if not isinstance(source, Path) else str(source))
                 if not cap.isOpened():
-                    self._log(f"[WARN] Nie można otworzyć: {vid_path}")
+                    self._log(f"[WARN] Nie można otworzyć: {src_name}")
                     continue
                 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.get(cv2.CAP_PROP_FRAME_COUNT) > 0 else None
                 fps = cap.get(cv2.CAP_PROP_FPS); fps = fps if fps and fps>1e-3 else 25.0
@@ -520,19 +480,21 @@ class App(AppUIMixin, tk.Tk):
                 ret, first_frame = cap.read()
                 cap.release()
                 if not ret or first_frame is None:
-                    self._log(f"[WARN] Brak pierwszej klatki: {vid_path.name}")
+                    self._log(f"[WARN] Brak pierwszej klatki: {src_name}")
                     continue
 
-                default_cfg_path = cnt_dir / f"{vid_path.stem}.json"
+                import re as _re
+                base_stem = (source.stem if isinstance(source, Path) else _re.sub(r'[^A-Za-z0-9_]+','_', src_name))
+                default_cfg_path = cnt_dir / f"{base_stem}.json"
                 editor = CounterEditor(self, first_frame, default_cfg_path=default_cfg_path)
                 self.wait_window(editor)
                 lines_cfg = editor.lines[:]
                 zones_cfg = editor.zones[:]
 
                 fps_out = max(1.0, fps / float(stride))
-                writer, out_video_path = open_video_writer_collision(vids_dir / f"{vid_path.stem}_annotated.mp4", W, H, fps_out)
+                writer, out_video_path = open_video_writer_collision(vids_dir / f"{base_stem}_annotated.mp4", W, H, fps_out)
                 if not writer or not writer.isOpened():
-                    self._log(f"[ERR] Nie można otworzyć VideoWriter dla: {vid_path.name}")
+                    self._log(f"[ERR] Nie można otworzyć VideoWriter dla: {src_name}")
                     continue
 
                 # --- TRACKER YAML (poprawka: fuse_score & with_reid) ---
@@ -569,7 +531,7 @@ fuse_score: False
                         )
 
                 generator = self.model.track(
-                    source=str(vid_path),
+                    source=(source if not isinstance(source, Path) else str(source)),
                     stream=True,
                     verbose=False,
                     imgsz=imgsz,
@@ -647,7 +609,7 @@ fuse_score: False
                                 line_states[li][tid] = st
                                 line_counts[li][direction] += 1
                                 events.append({
-                                    "video": str(vid_path.name),
+                                    "video": src_name,
                                     "frame": int(frame_idx),
                                     "time_sec": float(frame_idx / max(1.0, fps)),
                                     "track_id": int(tid),
@@ -673,7 +635,7 @@ fuse_score: False
                                     if inside_now: zone_counts[zi]["in"] += 1
                                     else: zone_counts[zi]["out"] += 1
                                     events.append({
-                                        "video": str(vid_path.name),
+                                        "video": src_name,
                                         "frame": int(frame_idx),
                                         "time_sec": float(frame_idx / max(1.0, fps)),
                                         "track_id": int(tid),
@@ -704,7 +666,17 @@ fuse_score: False
                             for s,c,tid in zip(det_confs, det_cids, det_ids):
                                 nm = self.names[c] if isinstance(self.names, dict) else self.names[c]
                                 labels.append(f"{nm} ID{tid}" + (f" {s:.2f}" if show_conf else ""))
-                            frame = sv.BoxAnnotator(thickness=2).annotate(frame, det, labels=labels)
+                            try:
+                                frame = sv.BoxAnnotator(thickness=2).annotate(frame, det, labels=labels)
+                            except TypeError:
+                                # fallback for supervision without 'labels' kwarg
+                                frame = sv.BoxAnnotator(thickness=2).annotate(frame, det)
+                            try:
+                                for (x1,y1,x2,y2), _lab in zip(det.xyxy, labels):
+                                    x1,y1 = int(x1), int(y1)
+                                    cv2.putText(frame, str(_lab), (x1, max(14, y1-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1, cv2.LINE_AA)
+                            except Exception:
+                                pass
                         else:
                             for (x1,y1,x2,y2), s, c, tid in zip(det_boxes, det_confs, det_cids, det_ids):
                                 cv2.rectangle(frame, (int(x1),int(y1)), (int(x2),int(y2)), (0,255,0), 2)
@@ -729,21 +701,21 @@ fuse_score: False
                     if est_total_processed:
                         frac = (processed)/max(1, est_total_processed)
                         eta = self._eta(time.time()-start_time, min(1.0, frac))
-                        self._set_progress(frac*100.0, f"{vid_path.name} — przetw. {processed}/{est_total_processed} klatek — stride {stride} — ETA {eta}")
+                        self._set_progress(frac*100.0, f"{src_name} — przetw. {processed}/{est_total_processed} klatek — stride {stride} — ETA {eta}")
                     else:
-                        self._set_progress(None, f"{vid_path.name} — przetw. {processed} — stride {stride}")
+                        self._set_progress(None, f"{src_name} — przetw. {processed} — stride {stride}")
 
                 writer.release()
 
                 df = pd.DataFrame(events)
-                ev_path = save_csv_collision(df, ev_dir / f"{vid_path.stem}_events.csv")
+                ev_path = save_csv_collision(df, ev_dir / f"{base_stem}_events.csv")
                 summary = {
-                    "video": str(vid_path.name),
+                    "video": src_name,
                     "lines": [{"name": ln["name"], "A_to_B": line_counts[i]["ab"], "B_to_A": line_counts[i]["ba"]} for i,ln in enumerate(lines_cfg)],
                     "zones": [{"name": zn["name"], "IN": zone_counts[i]["in"], "OUT": zone_counts[i]["out"]} for i,zn in enumerate(zones_cfg)],
                     "total_events": int(len(events))
                 }
-                sum_path = save_json_collision(summary, summ_dir / f"{vid_path.stem}_counts.json")
+                sum_path = save_json_collision(summary, summ_dir / f"{base_stem}_counts.json")
                 self._log(f"Zapisano: {out_video_path.name}, {ev_path.name}, {Path(sum_path).name}")
 
             meta = {
@@ -780,8 +752,21 @@ fuse_score: False
 
     def _set_progress(self, percent: float|None, text: str):
         def _upd():
-            if percent is not None:
-                self.progress_var.set(max(0.0, min(100.0, percent)))
+            # Switch progressbar mode depending on 'percent'
+            try:
+                if percent is None:
+                    if not getattr(self, "_progress_indeterminate", False):
+                        self.progressbar.config(mode="indeterminate")
+                        self.progressbar.start(10)
+                        self._progress_indeterminate = True
+                else:
+                    if getattr(self, "_progress_indeterminate", False):
+                        self.progressbar.stop()
+                        self.progressbar.config(mode="determinate")
+                        self._progress_indeterminate = False
+                    self.progress_var.set(max(0.0, min(100.0, percent)))
+            except Exception:
+                pass
             self.progress_label.set(text)
         try: self.after(0, _upd)
         except Exception: pass
