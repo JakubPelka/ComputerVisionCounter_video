@@ -1,4 +1,4 @@
-# cv_video_run.py — unified loop for files & streams + ghost margin + zone alerts
+# cv_video_run.py — unified loop for files & streams + LIVE editor + ghost + zone alerts
 from __future__ import annotations
 from pathlib import Path
 import time, re as _re, threading
@@ -18,16 +18,16 @@ try:
 except Exception:
     sv = None
 
-# Windows beep (fallback no-op if not available)
+# ---- Beep (Windows) ----
 try:
     import winsound
     def _beep(freq, dur):
         threading.Thread(target=lambda: winsound.Beep(int(freq), int(dur)), daemon=True).start()
 except Exception:
-    def _beep(freq, dur):  # no-op on non-Windows
+    def _beep(freq, dur):  # no-op
         pass
 
-# ---------- Geometry helpers (same as before) ----------
+# ---- Geometry helpers ----
 def line_side(a, b, p):
     return (b[0]-a[0])*(p[1]-a[1]) - (b[1]-a[1])*(p[0]-a[0])
 def segments_intersect(p1, p2, q1, q2):
@@ -60,7 +60,7 @@ def dist_point_to_segment(a, b, p):
     cx, cy = ax + t*abx, ay + t*aby
     return float(np.hypot(px-cx, py-cy))
 
-# ---------- Tracker factory ----------
+# ---- ByteTrack factory (kompat) ----
 def _make_bytetrack(conf: float, track_buffer: int, match_thresh: float, min_hits: int):
     if sv is None:
         return None
@@ -84,7 +84,7 @@ def _make_bytetrack(conf: float, track_buffer: int, match_thresh: float, min_hit
         try: return sv.ByteTrack()
         except Exception: return None
 
-# ---------- Anchor + counting ----------
+# ---- Anchor + counting ----
 def _anchor_from_box(b, mode: str):
     if mode == "bottom": return 0.5*(b[0]+b[2]), b[3]
     return 0.5*(b[0]+b[2]), 0.5*(b[1]+b[3])
@@ -99,7 +99,7 @@ def _process_frame_counting(app, frame_idx, fps, names,
     anchors = [_anchor_from_box(b, anchor_mode) for b in det_boxes]
 
     for (tid, b, s, cid, (cx,cy)) in zip(det_ids, det_boxes, det_confs, det_cids, anchors):
-        # Lines
+        # Linie
         for li, ln in enumerate(lines_cfg):
             a = (ln["a"][0], ln["a"][1]); b2 = (ln["b"][0], ln["b"][1])
             st = line_states[li].get(tid, {"last_side": None, "last_frame": -9999})
@@ -133,7 +133,7 @@ def _process_frame_counting(app, frame_idx, fps, names,
             else:
                 line_states[li][tid] = st
 
-        # Zones + ALERT (z freeze)
+        # Strefy + ALERT
         for zi, zn in enumerate(zones_cfg):
             sstate = zone_states[zi].get(tid, {"inside": False, "last_change": -9999})
             inside_now = point_in_polygon((cx,cy), zn["pts"])
@@ -222,17 +222,28 @@ def run(app, sources, outp: Path, selected_idx):
             W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
             H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
 
-            ret, first_frame = cap.read()
-            if not ret or first_frame is None:
-                app._log(f"[WARN] Brak pierwszej klatki: {src_name}")
-                cap.release(); continue
-
-            base_stem = (source.stem if isinstance(source, Path) else _re.sub(r'[^A-Za-z0-9_]+','_', src_name if isinstance(source, str) else f"cam_{source}"))
-            default_cfg_path = cnt_dir / f"{base_stem}.json"
-            editor = CounterEditor(app, first_frame, default_cfg_path=default_cfg_path)
-            app.wait_window(editor)
-            lines_cfg = editor.lines[:]
-            zones_cfg = editor.zones[:]
+            if is_stream:
+                # === TRYB LIVE: edytor pracuje na tym samym cap (auto-pauza przy rysowaniu) ===
+                base_stem = _re.sub(r'[^A-Za-z0-9_]+','_', src_name if isinstance(source, str) else f"cam_{source}")
+                default_cfg_path = cnt_dir / f"{base_stem}.json"
+                editor = CounterEditor(app, frame_bgr=None, default_cfg_path=default_cfg_path, live_cap=cap)
+                app.wait_window(editor)
+                lines_cfg = editor.lines[:]
+                zones_cfg = editor.zones[:]
+                first_ready = True   # nie przetwarzamy oddzielnie „pierwszej klatki”
+            else:
+                # === Plik: zamrożona pierwsza klatka ===
+                ret, first_frame = cap.read()
+                if not ret or first_frame is None:
+                    app._log(f"[WARN] Brak pierwszej klatki: {src_name}")
+                    cap.release(); continue
+                base_stem = (source.stem if isinstance(source, Path) else _re.sub(r'[^A-Za-z0-9_]+','_', src_name))
+                default_cfg_path = cnt_dir / f"{base_stem}.json"
+                editor = CounterEditor(app, first_frame, default_cfg_path=default_cfg_path, live_cap=None)
+                app.wait_window(editor)
+                lines_cfg = editor.lines[:]
+                zones_cfg = editor.zones[:]
+                first_ready = False  # przetworzymy tę klatkę niżej
 
             fps_out = max(1.0, fps / float(stride))
             writer, out_video_path = open_video_writer_collision(vids_dir / f"{base_stem}_annotated.mp4", W, H, fps_out)
@@ -257,11 +268,7 @@ def run(app, sources, outp: Path, selected_idx):
             last_conf  = {}
             RESET_MISSED = max(3, stride * 2)
 
-            alert_state = {"last_ms": 0}  # globalny cooldown beepów
-
-            processed = 1
-            start_time = time.time()
-            est_total_processed = (total_frames // stride) if total_frames else None
+            alert_state = {"last_ms": 0}  # globalny cooldown
 
             def _handle_frame(frame, frame_idx):
                 nonlocal tracker, trails, missed
@@ -361,15 +368,19 @@ def run(app, sources, outp: Path, selected_idx):
                                 polygons=None,
                                 show_anchor=(app.overlay_mode.get()=="centroid"),
                                 anchor_points=anchors)
-                draw_counters(frame, lines_cfg, line_counts, zones_cfg, zone_counts, trails if trails is not None else None)
+                draw_counters(frame, lines_cfg, line_counts, zones_cfg, zone_counts,
+                              trails if trails is not None else None)
                 writer.write(frame)
                 app._show_preview_bgr(frame)
 
-            # pierwsza klatka
-            if 0 % stride == 0:
+            # „pierwsza klatka” tylko dla pliku
+            if not is_stream and not first_ready and 0 % stride == 0:
                 _handle_frame(first_frame, 0)
 
             processed = 1
+            start_time = time.time()
+            est_total_processed = (total_frames // stride) if total_frames else None
+
             while True:
                 if app.abort_event.is_set(): break
                 ret, frame = cap.read()
@@ -379,10 +390,11 @@ def run(app, sources, outp: Path, selected_idx):
                 frame_idx = processed - 1
                 _handle_frame(frame, frame_idx)
 
-                if est_total_processed := (total_frames // stride) if total_frames else None:
-                    frac = min(1.0, (processed // stride)/max(1, est_total_processed))
+                if est_total_processed is not None:
+                    done = min(est_total_processed, processed // stride)
+                    frac = min(1.0, done/max(1, est_total_processed))
                     eta = app._eta(time.time()-start_time, max(1e-6, frac))
-                    app._set_progress(frac*100.0, f"{src_name} — {processed//stride}/{est_total_processed} — stride {stride} — ETA {eta}")
+                    app._set_progress(frac*100.0, f"{src_name} — {done}/{est_total_processed} — stride {stride} — ETA {eta}")
                 else:
                     app._set_progress(None, f"{src_name} — przetw. {processed} — stride {stride}")
 

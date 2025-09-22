@@ -223,7 +223,7 @@ def choose_default_target() -> Path | None:
     return None
 
 def main():
-    print("=== bootstrap_env.py ===")
+    print("=== start.py ===")
     print(f"Python:     {sys.executable}")
     print(f"Project:    {HERE}")
     print(f"PKGS_DIR:   {PKGS_DIR}")

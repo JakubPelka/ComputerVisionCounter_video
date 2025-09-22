@@ -1,6 +1,6 @@
-# cv_video.py — starter + GUI glue + podgląd w osobnym oknie
+# cv_video.py — starter + GUI glue + podgląd w osobnym oknie + Presety (Zapisz/Wczytaj)
 from __future__ import annotations
-import threading, sys
+import threading, sys, json
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -64,10 +64,9 @@ class App(AppUIMixin, tk.Tk):
         self.abort_event = threading.Event()
         self.worker_done = threading.Event()
         self.worker_thread = None
-        self._progress_indeterminate = False  # <— flaga trybu "indeterminate"
+        self._progress_indeterminate = False  # flaga trybu "indeterminate"
 
         # osobne okno podglądu
-        self.preview_enabled = tk.BooleanVar(value=True)
         self._preview_win = None
         self._preview_lbl = None
         self._preview_imgtk = None
@@ -76,10 +75,7 @@ class App(AppUIMixin, tk.Tk):
         self.trace_enabled   = tk.BooleanVar(value=True)
         self.trace_len       = tk.IntVar(value=24)
         self.anchor_mode     = tk.StringVar(value="center")
-        self.preview_enabled = tk.BooleanVar(value=True)
-        self.trace_enabled   = tk.BooleanVar(value=True)
         self.ghost_margin    = tk.IntVar(value=12)
-
 
         self.build_ui()
         self._autoload_best_model()
@@ -93,7 +89,9 @@ class App(AppUIMixin, tk.Tk):
 
     def _update_preset_label(self):
         p = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
-        self.preset_label.config(text=f"imgsz={p['imgsz']}  conf={p['conf']}  iou={p['iou']}  skip={p['frame_skip']}  buf={p['track_buffer']}  match={p['match_thresh']}  hits={p['min_hits']}")
+        self.preset_label.config(text=f"imgsz={p['imgsz']}  conf={p['conf']}  iou={p['iou']}  "
+                                      f"skip={p['frame_skip']}  buf={p['track_buffer']}  "
+                                      f"match={p['match_thresh']}  hits={p['min_hits']}")
 
     def browse_input(self):
         d = filedialog.askdirectory(title="Wybierz folder z wideo")
@@ -128,7 +126,8 @@ class App(AppUIMixin, tk.Tk):
                 best = find_best_weights(Path(wp) if wp else (Path(__file__).parent / MODEL_DIRNAME))
                 if best: self.weights_path.set(str(best))
             if self.weights_path.get(): self.load_model_and_classes()
-        except Exception: pass
+        except Exception:
+            pass
 
     def load_model_and_classes(self):
         try:
@@ -165,53 +164,137 @@ class App(AppUIMixin, tk.Tk):
     def selected_class_indices(self):
         return [idx for (nm, v, idx) in self.class_vars if v.get()]
 
+    # ========= OPCJE ZAAWANSOWANE + PRESET SAVE/LOAD =========
     def open_advanced(self):
-        win = tk.Toplevel(self); win.title("Opcje zaawansowane"); win.geometry("560x540")
+        win = tk.Toplevel(self); win.title("Opcje zaawansowane"); win.geometry("620x640")
+
+        # bazowy preset (gdy override wył., to preset z suwaka + domyślne histerezy)
         p = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
-        def add_row(lbl, var):
-            f = tk.Frame(win); f.pack(fill="x", pady=3)
-            tk.Label(f, text=lbl, width=26, anchor="w").pack(side="left")
-            e = tk.Entry(f, textvariable=var, width=18); e.pack(side="left"); return e
-        base = self.adv_params if self.advanced_override else {**p,
+        base = self.adv_params if self.advanced_override else {
+            **p,
             "line_min_gap": LINE_MIN_GAP_FRAMES_DEFAULT,
             "line_min_sep": LINE_MIN_SEP_PX_DEFAULT,
             "zone_min_gap": ZONE_MIN_GAP_FRAMES_DEFAULT
         }
-        def getvar(key):
-            import tkinter as _tk
-            return _tk.StringVar(value=str(base.get(key,"")))
-        v = {k: getvar(k) for k in ["imgsz","conf","iou","frame_skip","track_buffer","match_thresh","min_hits","line_min_gap","line_min_sep","zone_min_gap"]}
-        for k in v: add_row(k, v[k])
-        def apply():
+
+        def add_row(parent, lbl, var, w=18):
+            f = tk.Frame(parent); f.pack(fill="x", pady=4)
+            tk.Label(f, text=lbl, width=26, anchor="w").pack(side="left")
+            e = tk.Entry(f, textvariable=var, width=w); e.pack(side="left")
+            return e
+
+        # pola (StringVar, łatwo zapisywać do JSON)
+        v_imgsz = tk.StringVar(value=str(base.get("imgsz", "")))
+        v_conf  = tk.StringVar(value=str(base.get("conf", "")))
+        v_iou   = tk.StringVar(value=str(base.get("iou", "")))
+        v_skip  = tk.StringVar(value=str(base.get("frame_skip", "")))
+        v_buf   = tk.StringVar(value=str(base.get("track_buffer", "")))
+        v_match = tk.StringVar(value=str(base.get("match_thresh", "")))
+        v_hits  = tk.StringVar(value=str(base.get("min_hits", "")))
+        v_lgap  = tk.StringVar(value=str(base.get("line_min_gap", "")))
+        v_lsep  = tk.StringVar(value=str(base.get("line_min_sep", "")))
+        v_zhgap = tk.StringVar(value=str(base.get("zone_min_gap", "")))
+
+        body = tk.Frame(win); body.pack(fill="both", expand=True, padx=8, pady=8)
+        add_row(body, "imgsz", v_imgsz)
+        add_row(body, "conf", v_conf)
+        add_row(body, "iou", v_iou)
+        add_row(body, "frame_skip", v_skip)
+        add_row(body, "track_buffer", v_buf)
+        add_row(body, "match_thresh", v_match)
+        add_row(body, "min_hits", v_hits)
+        add_row(body, "line_min_gap_frames", v_lgap)
+        add_row(body, "line_min_sep_px", v_lsep)
+        add_row(body, "zone_min_gap_frames", v_zhgap)
+
+        def _collect_from_fields() -> dict:
+            cur = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
+            def get_or(v, cast, key, default):
+                s = v.get().strip()
+                if s != "":
+                    try: return cast(s)
+                    except Exception: raise ValueError(f"Pole '{key}' ma nieprawidłową wartość: {s}")
+                return default if key not in cur else cur[key]
+            return {
+                "imgsz": get_or(v_imgsz, int,   "imgsz",        960),
+                "conf":  get_or(v_conf,  float, "conf",         0.60),
+                "iou":   get_or(v_iou,   float, "iou",          0.50),
+                "frame_skip":   get_or(v_skip,  int,   "frame_skip",   1),
+                "track_buffer": get_or(v_buf,   int,   "track_buffer", 60),
+                "match_thresh": get_or(v_match, float, "match_thresh", 0.78),
+                "min_hits":     get_or(v_hits,  int,   "min_hits",     2),
+                "line_min_gap": int(v_lgap.get().strip() or LINE_MIN_GAP_FRAMES_DEFAULT),
+                "line_min_sep": int(v_lsep.get().strip() or LINE_MIN_SEP_PX_DEFAULT),
+                "zone_min_gap": int(v_zhgap.get().strip() or ZONE_MIN_GAP_FRAMES_DEFAULT),
+            }
+
+        PRESETS_DIR = Path(__file__).parent / "presets"
+        PRESETS_DIR.mkdir(exist_ok=True)
+
+        def do_save_preset():
             try:
-                cur = VIDEO_PRESETS.get(int(self.quality.get()), DEFAULT_QUALITY)
-                def get_or(vv, cast, key, default):
-                    s = vv.get().strip()
-                    if s != "": return cast(s)
-                    return default if key not in cur else cur[key]
-                self.adv_params = {
-                    "imgsz": get_or(v["imgsz"], int, "imgsz", 960),
-                    "conf": get_or(v["conf"], float, "conf", 0.6),
-                    "iou": get_or(v["iou"], float, "iou", 0.5),
-                    "frame_skip": get_or(v["frame_skip"], int, "frame_skip", 1),
-                    "track_buffer": get_or(v["track_buffer"], int, "track_buffer", 60),
-                    "match_thresh": get_or(v["match_thresh"], float, "match_thresh", 0.78),
-                    "min_hits": get_or(v["min_hits"], int, "min_hits", 2),
-                    "line_min_gap": int(v["line_min_gap"].get() or LINE_MIN_GAP_FRAMES_DEFAULT),
-                    "line_min_sep": int(v["line_min_sep"].get() or LINE_MIN_SEP_PX_DEFAULT),
-                    "zone_min_gap": int(v["zone_min_gap"].get() or ZONE_MIN_GAP_FRAMES_DEFAULT),
-                }
+                data = _collect_from_fields()
+            except Exception as e:
+                messagebox.showerror("Preset", str(e)); return
+            defname = f"preset_q{self.quality.get()}.json"
+            path = filedialog.asksaveasfilename(
+                title="Zapisz preset (JSON)",
+                defaultextension=".json",
+                initialdir=str(PRESETS_DIR),
+                initialfile=defname,
+                filetypes=[("JSON","*.json")]
+            )
+            if not path: return
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                self._log(f"[ADV] Zapisano preset: {path}")
+            except Exception as e:
+                messagebox.showerror("Zapisz preset", str(e))
+
+        def do_load_preset():
+            path = filedialog.askopenfilename(
+                title="Wczytaj preset (JSON)",
+                initialdir=str(PRESETS_DIR),
+                filetypes=[("JSON","*.json"), ("Wszystkie","*.*")]
+            )
+            if not path: return
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if "imgsz" in data: v_imgsz.set(str(data["imgsz"]))
+                if "conf" in data: v_conf.set(str(data["conf"]))
+                if "iou" in data: v_iou.set(str(data["iou"]))
+                if "frame_skip" in data: v_skip.set(str(data["frame_skip"]))
+                if "track_buffer" in data: v_buf.set(str(data["track_buffer"]))
+                if "match_thresh" in data: v_match.set(str(data["match_thresh"]))
+                if "min_hits" in data: v_hits.set(str(data["min_hits"]))
+                if "line_min_gap" in data: v_lgap.set(str(data["line_min_gap"]))
+                if "line_min_sep" in data: v_lsep.set(str(data["line_min_sep"]))
+                if "zone_min_gap" in data: v_zhgap.set(str(data["zone_min_gap"]))
+                self._log(f"[ADV] Wczytano preset: {path}")
+            except Exception as e:
+                messagebox.showerror("Wczytaj preset", str(e))
+
+        def _apply():
+            try:
+                self.adv_params = _collect_from_fields()
                 self.advanced_override = True
-                self._log("[ADV] Zastosowano override.")
+                self._log("[ADV] Zastosowano override (z pól/preset).")
                 win.destroy()
             except Exception as e:
                 messagebox.showerror("Adv", str(e))
-        def reset():
+
+        def _reset():
             self.advanced_override = False
-            self._log("[ADV] Przywrócono preset z suwaka.")
+            self._log("[ADV] Przywrócono preset z suwaka jakości.")
             win.destroy()
-        tk.Button(win, text="Zastosuj", command=apply).pack(side="left", padx=8, pady=8)
-        tk.Button(win, text="Przywróć preset", command=reset).pack(side="left", padx=8, pady=8)
+
+        btns = tk.Frame(win); btns.pack(fill="x", pady=10)
+        tk.Button(btns, text="Zastosuj", command=_apply).pack(side="left", padx=6)
+        tk.Button(btns, text="Przywróć preset z suwaka", command=_reset).pack(side="left", padx=6)
+        tk.Button(btns, text="Zapisz preset…", command=do_save_preset).pack(side="right", padx=6)
+        tk.Button(btns, text="Wczytaj preset…", command=do_load_preset).pack(side="right", padx=6)
 
     # --- sterowanie zadaniem ---
     def abort(self):
