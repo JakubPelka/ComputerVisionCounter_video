@@ -5,7 +5,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from cv_video_gui import ScrollableFrame, CounterEditor, AppUIMixin
+from cv_video_gui import ScrollableFrame, CounterEditor, AppUIMixin  # GUI utils
 from cv_video_run import run as core_run
 from cv_video_core import (
     ensure_dir,
@@ -27,10 +27,10 @@ except Exception as e:
 
 
 class App(AppUIMixin, tk.Tk):
-    # --- konfiguracja siatki klas (łatwo zmienić w jednym miejscu) ---
+    # --- konfiguracja siatki klas ---
     CLASS_COL_MIN = 2
-    CLASS_COL_MAX = 12       # ← podniesiony limit z 8 do 12
-    CLASS_CELL_PX = 160      # ~szerokość kolumny (checkbox + etykieta)
+    CLASS_COL_MAX = 12
+    CLASS_CELL_PX = 160  # docelowa szerokość jednej kolumny (orientacyjnie)
 
     def __init__(self):
         super().__init__()
@@ -49,7 +49,7 @@ class App(AppUIMixin, tk.Tk):
 
         self.model = None; self.names = None; self.class_vars = []
         self.selected_files = []
-        self._class_cols = 5   # zostanie aktualizowane dynamicznie
+        self._class_cols = 5   # aktualizowane dynamicznie
 
         # --- zaawansowane / presetable ---
         self.advanced_override = False
@@ -69,7 +69,7 @@ class App(AppUIMixin, tk.Tk):
             "trace_enabled": True,
             "trace_len": 24,
             "anchor_mode": "center",    # "bottom"|"center"
-            "ghost_margin": 12,
+            "ghost_margin": 24,
             "alert_enabled": False,
             "alert_classes": "cat,person",
             "alert_freq": 880,
@@ -144,7 +144,7 @@ class App(AppUIMixin, tk.Tk):
 
         # Overlay + Tracker
         ot = tk.Frame(root); ot.pack(fill="x", pady=4)
-        ov = tk.LabelFrame(ot, text="Overlay"); ov.pack(side="left", fill="x", expand=True, padx=(0,6))
+        ov = tk.LabelFrame(ot, text="Wizualizacja (overlay)"); ov.pack(side="left", fill="x", expand=True, padx=(0,6))
         tk.Radiobutton(ov, text="Centroidy", variable=self.overlay_mode, value="centroid").pack(side="left", padx=6)
         tk.Radiobutton(ov, text="Boksy", variable=self.overlay_mode, value="boxes").pack(side="left", padx=6)
         tk.Radiobutton(ov, text="Boksy + conf", variable=self.overlay_mode, value="boxes_conf").pack(side="left", padx=6)
@@ -248,47 +248,87 @@ class App(AppUIMixin, tk.Tk):
 
     # ========== klasy (dynamiczna siatka) ==========
     def _populate_classes(self, names):
-        """Rysuje siatkę checkboxów; zachowuje zaznaczenia przy relayout."""
+        """
+        Rysuje siatkę checkboxów. Każda kolumna ma równą szerokość policzoną
+        z aktualnie dostępnej szerokości canvasa — dzięki temu layout zapełnia
+        równo cały obszar (bez „urwanej” ostatniej kolumny).
+        """
         container = self.classes_scroll.inner
-        previously_selected = set(idx for (_nm, var, idx) in getattr(self, "class_vars", []) if var.get())
 
+        # zapamiętaj zaznaczenia, żeby przerysowanie nie kasowało wyboru
+        previously_selected = set(idx for (_nm, var, idx) in getattr(self, "class_vars", []) if var.get())
         for w in container.winfo_children():
             w.destroy()
         self.class_vars.clear()
 
         id2name = list(names.values()) if isinstance(names, dict) else list(names)
 
-        cols = self._class_cols or self._calc_class_cols()
-        cols = max(self.CLASS_COL_MIN, min(self.CLASS_COL_MAX, cols))
+        # szerokość dostępnego obszaru (realna szerokość canvasa ScrollableFrame)
+        try:
+            avail = max(320, int(self.classes_scroll.canvas.winfo_width()))
+        except Exception:
+            avail = 800
 
+        # policz liczbę kolumn względem „docelowej” szerokości komórki
+        cols = int(round(avail / float(self.CLASS_CELL_PX)))
+        cols = max(self.CLASS_COL_MIN, min(self.CLASS_COL_MAX, cols))
+        self._class_cols = cols
+
+        # rzeczywista szerokość kolumny tak, by sumarycznie wypełnić dostępny obszar
+        col_w = max(120, (avail // cols))
+
+        # ustaw równy „minsize” dla każdej kolumny siatki
+        for c in range(cols):
+            container.grid_columnconfigure(c, minsize=col_w, weight=1, uniform="classes")
+
+        # narysuj pola — każde w „komórce” o stałej szerokości; Checkbutton = wrap do szerokości
         for i, nm in enumerate(id2name):
             var = tk.BooleanVar(value=(i in previously_selected))
-            cb = tk.Checkbutton(container, text=nm, variable=var)
             r, c = divmod(i, cols)
-            cb.grid(row=r, column=c, sticky="w", padx=6, pady=3)
+
+            cell = tk.Frame(container, width=col_w)
+            cell.grid(row=r, column=c, sticky="nw", padx=6, pady=3)
+            # zablokuj autoskalowanie, zachowaj stałą szerokość komórki
+            cell.grid_propagate(False)
+
+            cb = tk.Checkbutton(cell, text=nm, variable=var, anchor="w", justify="left",
+                                wraplength=col_w - 12)
+            cb.pack(fill="x", expand=True, anchor="w")
             self.class_vars.append((nm, var, i))
 
     def _calc_class_cols(self, width: int | None = None) -> int:
-        """Liczba kolumn na podstawie dostępnej szerokości canvasa."""
+        """(zostawione dla zgodności) – liczy kolumny z dostępnej szerokości."""
         try:
             if width is None:
                 width = max(320, self.classes_scroll.canvas.winfo_width())
         except Exception:
             width = 800
-        cols = max(self.CLASS_COL_MIN,
-                   min(self.CLASS_COL_MAX, width // self.CLASS_CELL_PX))
-        return cols
+        cols = int(round(width / float(self.CLASS_CELL_PX)))
+        return max(self.CLASS_COL_MIN, min(self.CLASS_COL_MAX, cols))
 
     def _on_classes_canvas_config(self, event):
-        """Reakcja na zmianę szerokości obszaru klas – relayout przy zmianie kolumn."""
+        """
+        Reakcja na zmianę szerokości obszaru klas.
+        Przy dużej zmianie – przerysowujemy; przy drobnej – tylko aktualizujemy minsize kolumn.
+        """
         try:
-            new_cols = self._calc_class_cols(event.width)
+            avail = max(320, int(event.width))
         except Exception:
-            new_cols = self._calc_class_cols()
+            avail = max(320, int(self.classes_scroll.canvas.winfo_width()))
+        new_cols = self._calc_class_cols(avail)
+
         if new_cols != self._class_cols:
             self._class_cols = new_cols
             if self.names is not None:
                 self._populate_classes(self.names)
+        else:
+            # ta sama liczba kolumn – wystarczy dopasować minsize (kolumny „rozjadą” się równo)
+            col_w = max(120, (avail // max(1, self._class_cols)))
+            for c in range(self._class_cols):
+                try:
+                    self.classes_scroll.inner.grid_columnconfigure(c, minsize=col_w, weight=1, uniform="classes")
+                except Exception:
+                    pass
 
     def selected_class_indices(self):
         return [idx for (nm, v, idx) in self.class_vars if v.get()]
@@ -297,7 +337,6 @@ class App(AppUIMixin, tk.Tk):
     def open_advanced(self):
         win = tk.Toplevel(self); win.title("Opcje zaawansowane"); win.geometry("680x720")
 
-        # bazowy preset (gdy override OFF → suwak jakości + histerezy + extra z bieżących pól)
         p = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
         base = self.adv_params if self.advanced_override else {
             **p,

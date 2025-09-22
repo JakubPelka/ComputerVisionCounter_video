@@ -11,13 +11,13 @@ SUPPORTED_VID_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v", ".wmv", ".mpg", ".
 MODEL_DIRNAME = "models"
 
 VIDEO_PRESETS = {
-    1: {"imgsz": 640,  "conf": 0.50, "iou": 0.60, "frame_skip": 2, "track_buffer": 30, "match_thresh": 0.80, "min_hits": 2},
-    2: {"imgsz": 896,  "conf": 0.55, "iou": 0.55, "frame_skip": 2, "track_buffer": 45, "match_thresh": 0.80, "min_hits": 2},
+    1: {"imgsz": 320,  "conf": 0.50, "iou": 0.60, "frame_skip": 2, "track_buffer": 5, "match_thresh": 0.80, "min_hits": 2},
+    2: {"imgsz": 640,  "conf": 0.55, "iou": 0.55, "frame_skip": 2, "track_buffer": 30, "match_thresh": 0.80, "min_hits": 2},
     3: {"imgsz": 960,  "conf": 0.60, "iou": 0.50, "frame_skip": 1, "track_buffer": 60, "match_thresh": 0.78, "min_hits": 2},
     4: {"imgsz": 1280, "conf": 0.65, "iou": 0.50, "frame_skip": 1, "track_buffer": 75, "match_thresh": 0.75, "min_hits": 3},
     5: {"imgsz": 1280, "conf": 0.70, "iou": 0.45, "frame_skip": 0, "track_buffer": 90, "match_thresh": 0.75, "min_hits": 3},
 }
-DEFAULT_QUALITY = 5
+DEFAULT_QUALITY = 1
 DEFAULT_TRACKER = "bytetrack"
 
 LINE_MIN_GAP_FRAMES_DEFAULT = 8
