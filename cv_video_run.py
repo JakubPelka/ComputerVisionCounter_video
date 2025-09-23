@@ -1,4 +1,4 @@
-# cv_video_run.py — fix: no duplicate zone labels + restored trails; continuous zone beep
+# cv_video_run.py — trace/frame color+thickness (advanced) + zone alert invert (0/1)
 from __future__ import annotations
 from pathlib import Path
 import time, re as _re, threading
@@ -83,7 +83,28 @@ def _preview(app, frame_bgr, frame_idx, fps, total_frames):
         if hasattr(app, "show_preview"):
             app.show_preview(frame_bgr); return
     except Exception:
-        pass  # nie wyłączaj procesu
+        pass  # brak preview nie przerywa run
+
+def _parse_color(val):
+    """Zwraca kolor w BGR lub None. Akceptuje: None/''/'auto', '#RRGGBB' (RGB), 'B,G,R'."""
+    if val is None: return None
+    if isinstance(val, (tuple, list)) and len(val) == 3:
+        b,g,r = val; return (int(b), int(g), int(r))
+    s = str(val).strip()
+    if not s or s.lower() == "auto":
+        return None
+    if s.startswith("#") and len(s) == 7:
+        # hex RGB -> BGR
+        r = int(s[1:3], 16); g = int(s[3:5], 16); b = int(s[5:7], 16)
+        return (b, g, r)
+    # B,G,R
+    try:
+        parts = [int(x.strip()) for x in s.replace(";",",").split(",")]
+        if len(parts) == 3:
+            return (parts[0], parts[1], parts[2])
+    except Exception:
+        pass
+    return None
 
 # ---------- Tracker ----------
 def _make_bytetrack(conf: float, track_buffer: int, match_thresh: float, min_hits: int):
@@ -108,31 +129,39 @@ def _make_bytetrack(conf: float, track_buffer: int, match_thresh: float, min_hit
         except Exception: return None
 
 # ---------- Drawing helpers ----------
-def _draw_lines_zones(frame, lines_cfg, zones_cfg):
-    """Rysuje TYLKO krawędzie (bez etykiet, by uniknąć podwójnych napisów)."""
+def _draw_lines_zones(frame, lines_cfg, zones_cfg, frame_color, frame_thickness):
+    """Rysuje same krawędzie (bez etykiet) – by uniknąć duplikatów."""
+    if frame_thickness is not None and frame_thickness <= 0:
+        return
+    th = int(frame_thickness or 2)
+    # Linie
     for ln in lines_cfg or []:
         a = tuple(map(int, ln["a"])); b = tuple(map(int, ln["b"]))
-        color = tuple(int(c) for c in ln.get("color", (0, 255, 255)))
-        cv2.line(frame, a, b, color, 2, cv2.LINE_AA)
+        col = frame_color if frame_color is not None else tuple(int(c) for c in ln.get("color", (0,255,255)))
+        cv2.line(frame, a, b, col, th, cv2.LINE_AA)
+    # Strefy
     for zn in zones_cfg or []:
         pts = np.array(zn["pts"], dtype=np.int32)
         if len(pts) >= 3:
-            color = tuple(int(c) for c in zn.get("color", (0, 200, 255)))
-            cv2.polylines(frame, [pts], True, color, 2, cv2.LINE_AA)
+            col = frame_color if frame_color is not None else tuple(int(c) for c in zn.get("color", (0,200,255)))
+            cv2.polylines(frame, [pts], True, col, th, cv2.LINE_AA)
 
-def _draw_trails(frame, trails):
-    """Prosty renderer śladów (polilinie)."""
-    if not trails:
+def _draw_trails(frame, trails, trace_color, trace_thickness):
+    """Prosty renderer śladów. trace_thickness=0 → brak śladów."""
+    th = int(trace_thickness if trace_thickness is not None else 2)
+    if th <= 0 or not trails:
         return
     for tid, dq in trails.items():
         if len(dq) < 2:
             continue
-        # kolor na bazie id (stabilny, ale prosty)
-        r = (37 * tid) % 256
-        g = (91 * tid) % 256
-        b = (157 * tid) % 256
+        if trace_color is None:
+            # stabilny „auto” kolor na bazie id
+            r = (37 * tid) % 256; g = (91 * tid) % 256; b = (157 * tid) % 256
+            col = (int(b), int(g), int(r))
+        else:
+            col = trace_color
         pts = np.array(dq, dtype=np.int32)
-        cv2.polylines(frame, [pts], False, (int(b), int(g), int(r)), 2, cv2.LINE_AA)
+        cv2.polylines(frame, [pts], False, col, th, cv2.LINE_AA)
 
 def _safe_draw_counters(frame, lines_cfg, line_counts, zones_cfg, zone_counts):
     ok = False
@@ -149,7 +178,7 @@ def _safe_draw_counters(frame, lines_cfg, line_counts, zones_cfg, zone_counts):
         return
     # Fallback HUD
     x, y = 12, 24
-    cv2.rectangle(frame, (6,6), (360, max(36, y + 18*(len(lines_cfg)+len(zones_cfg))+12)), (0,0,0), -1)
+    cv2.rectangle(frame, (6,6), (420, max(36, y + 18*(len(lines_cfg)+len(zones_cfg))+12)), (0,0,0), -1)
     cv2.putText(frame, "Counters", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2, cv2.LINE_AA)
     y += 24
     for i, ln in enumerate(lines_cfg or []):
@@ -172,7 +201,8 @@ def _process_frame_counting(app, frame_idx, fps, names,
                             last_anchor, line_states, line_counts, zone_states, zone_counts, events,
                             line_min_gap, anchor_mode,
                             alert_enabled, alert_classes_set, alert_freq, alert_dur,
-                            alert_state, alert_freeze_ms):
+                            alert_state, alert_freeze_ms,
+                            alert_when_inside):
     anchors = [_anchor_from_box(b, anchor_mode) for b in det_boxes]
 
     for (tid, b, s, cid, (cx,cy)) in zip(det_ids, det_boxes, det_confs, det_cids, anchors):
@@ -211,7 +241,7 @@ def _process_frame_counting(app, frame_idx, fps, names,
             else:
                 line_states[li][tid] = st
 
-        # Strefy: ciągły beep, gdy obiekt jest W ŚRODKU (brak beep na granicy)
+        # Strefy: ciągły beep wg trybu (inside/outside)
         for zi, zn in enumerate(zones_cfg or []):
             sstate = zone_states[zi].get(tid, {"inside": False, "last_change": -9999})
             inside_now = point_in_polygon((cx,cy), zn["pts"])
@@ -236,13 +266,17 @@ def _process_frame_counting(app, frame_idx, fps, names,
             else:
                 zone_states[zi][tid] = sstate
 
-            if alert_enabled and sstate.get("inside", False):
-                cname = (names[cid] if isinstance(names, dict) else names[cid]).lower()
-                if (not alert_classes_set) or (cname in alert_classes_set):
-                    now_ms = int(time.time()*1000)
-                    if now_ms - alert_state.get("last_ms", 0) >= int(alert_freeze_ms):
-                        _beep(alert_freq, alert_dur)
-                        alert_state["last_ms"] = now_ms
+            # Beep ciągły wg trybu
+            if alert_enabled:
+                want_inside = bool(alert_when_inside)  # 1=inside, 0=outside
+                cond = (sstate.get("inside", False) is True) if want_inside else (sstate.get("inside", False) is False)
+                if cond:
+                    cname = (names[cid] if isinstance(names, dict) else names[cid]).lower()
+                    if (not alert_classes_set) or (cname in alert_classes_set):
+                        now_ms = int(time.time()*1000)
+                        if now_ms - alert_state.get("last_ms", 0) >= int(alert_freeze_ms):
+                            _beep(alert_freq, alert_dur)
+                            alert_state["last_ms"] = now_ms
 
         last_anchor[tid] = (cx,cy)
 
@@ -261,6 +295,7 @@ def run(app, sources, outp: Path, selected_idx):
         p = VIDEO_PRESETS.get(int(app.quality.get()), DEFAULT_QUALITY).copy()
         if getattr(app, "advanced_override", False):
             p.update(app.adv_params)
+
         imgsz = int(p["imgsz"]); conf = float(p["conf"]); iou = float(p["iou"])
         frame_skip = int(p["frame_skip"]); stride = max(1, frame_skip + 1)
         track_buffer = int(p["track_buffer"]); match_thresh = float(p["match_thresh"]); min_hits = int(p["min_hits"])
@@ -272,21 +307,36 @@ def run(app, sources, outp: Path, selected_idx):
         select_names = [id2name[i] for i in selected_idx]
         anchor_mode = getattr(app, "anchor_mode", None).get() if hasattr(app, "anchor_mode") else "bottom"
 
-        # TRACE (włącz/wyłącz + długość)
+        # --- TRACE & FRAME (ADVANCED) ---
         trace_on = getattr(app, "trace_enabled", None).get() if hasattr(app, "trace_enabled") else True
         trace_len = int(getattr(app, "trace_len", None).get() if hasattr(app, "trace_len") else 24)
+        trace_color = _parse_color(p.get("trace_color", None))
+        trace_thickness = int(p.get("trace_thickness", 2)) if str(p.get("trace_thickness","")).strip() != "" else 2
 
+        frame_color = _parse_color(p.get("overlay_frame_color", None))
+        frame_thickness = int(p.get("overlay_frame_thickness", 2)) if str(p.get("overlay_frame_thickness","")).strip() != "" else 2
+
+        # --- ALERTS ---
         alert_enabled = getattr(app, "alert_enabled", None).get() if hasattr(app, "alert_enabled") else False
         raw_classes = (getattr(app, "alert_classes", None).get() if hasattr(app, "alert_classes") else "person")
         alert_classes_set = set([c.strip().lower() for c in raw_classes.split(",") if c.strip()])
         alert_freq = int(getattr(app, "alert_freq", None).get() if hasattr(app, "alert_freq") else 880)
         alert_dur  = int(getattr(app, "alert_dur", None).get() if hasattr(app, "alert_dur") else 180)
         alert_freeze_ms = int(getattr(app, "alert_freeze", None).get() if hasattr(app, "alert_freeze") else 1500)
+        alert_when_inside = int(p.get("alert_zone_inside", 1))  # 1=in zone (default), 0=outside
 
-        app._log(f"Param: imgsz={imgsz}, conf={conf}, iou={iou}, frame_skip={frame_skip}, "
-                 f"track_buffer={track_buffer}, match={match_thresh}, hits={min_hits}, device={device}")
-        app._log(f"Tracker: bytetrack | Klasy: {', '.join(select_names)} | "
-                 f"Alert={'ON' if alert_enabled else 'OFF'} ({', '.join(sorted(alert_classes_set))}, freeze={alert_freeze_ms}ms)")
+        app._log(
+            "Param: imgsz=%s, conf=%s, iou=%s, frame_skip=%s, track_buffer=%s, match=%s, hits=%s, device=%s" %
+            (imgsz, conf, iou, frame_skip, track_buffer, match_thresh, min_hits, device)
+        )
+        app._log(
+            "Tracker: bytetrack | Klasy: %s | Alert=%s (%s, freeze=%sms, zone_mode=%s)" %
+            (', '.join(select_names),
+             'ON' if alert_enabled else 'OFF',
+             ', '.join(sorted(alert_classes_set)) if alert_classes_set else '*',
+             alert_freeze_ms,
+             'INSIDE' if alert_when_inside else 'OUTSIDE')
+        )
 
         for vi, source in enumerate(sources):
             src_name = (str(source) if not isinstance(source, (int,)) else f"cam_{source}")
@@ -380,7 +430,8 @@ def run(app, sources, outp: Path, selected_idx):
                     last_anchor, line_states, line_counts, zone_states, zone_counts, events,
                     line_min_gap, anchor_mode,
                     alert_enabled, alert_classes_set, alert_freq, alert_dur,
-                    alert_state, alert_freeze_ms
+                    alert_state, alert_freeze_ms,
+                    alert_when_inside
                 )
 
                 # Aktualizacja śladów
@@ -405,10 +456,10 @@ def run(app, sources, outp: Path, selected_idx):
                 except Exception:
                     pass
 
-                # Linie/strefy (bez etykiet, by uniknąć duplikatów)
-                _draw_lines_zones(overlay, lines_cfg, zones_cfg)
-                # Ślady
-                _draw_trails(overlay, trails)
+                # Linie/strefy (bez etykiet, nadpisywalny kolor/grubość)
+                _draw_lines_zones(overlay, lines_cfg, zones_cfg, frame_color, frame_thickness)
+                # Ślady (nadpisywalny kolor/grubość)
+                _draw_trails(overlay, trails, trace_color, trace_thickness)
                 # Liczniki (fallback HUD, jeśli Twoja funkcja ma inną sygnaturę)
                 _safe_draw_counters(overlay, lines_cfg, line_counts, zones_cfg, zone_counts)
 
@@ -453,6 +504,13 @@ def run(app, sources, outp: Path, selected_idx):
                 "fps": float(fps),
                 "lines": [{"name": ln["name"], **line_counts[i]} for i,ln in enumerate(lines_cfg)],
                 "zones": [{"name": zn["name"], **zone_counts[i]} for i,zn in enumerate(zones_cfg)],
+                "advanced": {
+                    "trace_color": p.get("trace_color", None),
+                    "trace_thickness": trace_thickness,
+                    "overlay_frame_color": p.get("overlay_frame_color", None),
+                    "overlay_frame_thickness": frame_thickness,
+                    "alert_zone_inside": alert_when_inside
+                }
             }
             sum_path = save_json_collision(summary, summ_dir / f"{base_stem}_summary.json")
             app._log(f"Zapisano summary: {sum_path}")
