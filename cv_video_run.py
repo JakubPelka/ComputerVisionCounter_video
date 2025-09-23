@@ -1,4 +1,4 @@
-# cv_video_run.py — zone alert inside/outside + trace/frame color/thickness (ADV) + custom counters + proper draw_detections
+# cv_video_run.py — events: frame + timecode (mm:ss / h:mm:ss) + clock (dla LIVE)
 from __future__ import annotations
 from pathlib import Path
 import time, re as _re, threading
@@ -6,7 +6,7 @@ import cv2, numpy as np, pandas as pd
 from collections import deque
 
 from cv_video_gui import CounterEditor
-from cv_video_overlay import draw_detections  # draw_counters is not used anymore to avoid double drawing
+from cv_video_overlay import draw_detections
 from cv_video_core import (
     ensure_dir, device_auto_str, open_video_writer_collision,
     save_json_collision, save_csv_collision,
@@ -25,7 +25,7 @@ try:
     def _beep(freq, dur):
         threading.Thread(target=lambda: winsound.Beep(int(freq), int(dur)), daemon=True).start()
 except Exception:
-    def _beep(freq, dur):  # no-op poza Windows
+    def _beep(freq, dur):
         pass
 
 # ---------- Geometry ----------
@@ -83,10 +83,10 @@ def _preview(app, frame_bgr, frame_idx, fps, total_frames):
         if hasattr(app, "show_preview"):
             app.show_preview(frame_bgr); return
     except Exception:
-        pass  # brak preview nie przerywa run
+        pass
 
 def _parse_color(val):
-    """Zwraca kolor w BGR lub None. Akceptuje: None/''/'auto', '#RRGGBB' (RGB), 'B,G,R'."""
+    """None/''/'auto' → None; '#RRGGBB' (RGB) → BGR; 'B,G,R' → tuple."""
     if val is None: return None
     if isinstance(val, (tuple, list)) and len(val) == 3:
         b,g,r = val; return (int(b), int(g), int(r))
@@ -94,10 +94,8 @@ def _parse_color(val):
     if not s or s.lower() == "auto":
         return None
     if s.startswith("#") and len(s) == 7:
-        # hex RGB -> BGR
         r = int(s[1:3], 16); g = int(s[3:5], 16); b = int(s[5:7], 16)
         return (b, g, r)
-    # B,G,R
     try:
         parts = [int(x.strip()) for x in s.replace(";",",").split(",")]
         if len(parts) == 3:
@@ -105,6 +103,17 @@ def _parse_color(val):
     except Exception:
         pass
     return None
+
+def _fmt_timecode(sec: float) -> str:
+    """mm:ss lub h:mm:ss jeśli >= 1h."""
+    if sec < 0: sec = 0.0
+    s = int(round(sec))
+    h = s // 3600
+    m = (s % 3600) // 60
+    s = s % 60
+    if h > 0:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
 
 # ---------- Tracker ----------
 def _make_bytetrack(conf: float, track_buffer: int, match_thresh: float, min_hits: int):
@@ -130,16 +139,13 @@ def _make_bytetrack(conf: float, track_buffer: int, match_thresh: float, min_hit
 
 # ---------- Drawing helpers ----------
 def _draw_lines_zones(frame, lines_cfg, zones_cfg, frame_color, frame_thickness):
-    """Rysuje linie i strefy JEDEN raz, bez etykiet (kolor/grubość z ADV)."""
     th = int(frame_thickness if frame_thickness is not None else 2)
     if th <= 0:
         return
-    # Linie
     for ln in (lines_cfg or []):
         a = tuple(map(int, ln["a"])); b = tuple(map(int, ln["b"]))
         col = frame_color if frame_color is not None else (0,165,255)
         cv2.line(frame, a, b, col, th, cv2.LINE_AA)
-    # Strefy
     for zn in (zones_cfg or []):
         pts = np.array(zn["pts"], dtype=np.int32)
         if len(pts) >= 3:
@@ -162,14 +168,11 @@ def _draw_trails(frame, trails, trace_color, trace_thickness):
         cv2.polylines(frame, [pts], False, col, th, cv2.LINE_AA)
 
 def _draw_counts_labels(frame, lines_cfg, line_counts, zones_cfg, zone_counts):
-    # Proste napisy w miejscach sensownych: środek linii i centroid wielokąta
-    # Linia
     for i, ln in enumerate(lines_cfg or []):
         ax, ay = ln["a"]; bx, by = ln["b"]
         cx = int((ax + bx) / 2); cy = int((ay + by) / 2)
         s = f"{ln['name']}  A→B:{line_counts[i]['ab']}  B→A:{line_counts[i]['ba']}"
         cv2.putText(frame, s, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,200,255), 2, cv2.LINE_AA)
-    # Strefa
     for i, zn in enumerate(zones_cfg or []):
         pts = np.array(zn["pts"], dtype=np.int32)
         if len(pts) >= 3:
@@ -189,7 +192,8 @@ def _process_frame_counting(app, frame_idx, fps, names,
                             line_min_gap, anchor_mode,
                             alert_enabled, alert_classes_set, alert_freq, alert_dur,
                             alert_state, alert_freeze_ms,
-                            alert_when_inside):
+                            alert_when_inside,
+                            event_time_sec, timecode_str, clock_str):
     anchors = [_anchor_from_box(b, anchor_mode) for b in det_boxes]
 
     for (tid, b, s, cid, (cx,cy)) in zip(det_ids, det_boxes, det_confs, det_cids, anchors):
@@ -213,7 +217,9 @@ def _process_frame_counting(app, frame_idx, fps, names,
                 line_counts[li][direction] += 1
                 events.append({
                     "frame": int(frame_idx),
-                    "time_sec": float(frame_idx / max(1.0, fps)),
+                    "time_sec": float(event_time_sec),
+                    "timecode": timecode_str,
+                    "clock": clock_str,
                     "track_id": int(tid),
                     "class_id": int(cid),
                     "class_name": (names[cid] if isinstance(names, dict) else names[cid]),
@@ -242,7 +248,9 @@ def _process_frame_counting(app, frame_idx, fps, names,
                     else: zone_counts[zi]["out"] += 1
                     events.append({
                         "frame": int(frame_idx),
-                        "time_sec": float(frame_idx / max(1.0, fps)),
+                        "time_sec": float(event_time_sec),
+                        "timecode": timecode_str,
+                        "clock": clock_str,
                         "track_id": int(tid),
                         "class_id": int(cid),
                         "class_name": (names[cid] if isinstance(names, dict) else names[cid]),
@@ -310,7 +318,7 @@ def run(app, sources, outp: Path, selected_idx):
         alert_freq = int(getattr(app, "alert_freq", None).get() if hasattr(app, "alert_freq") else 880)
         alert_dur  = int(getattr(app, "alert_dur", None).get() if hasattr(app, "alert_dur") else 180)
         alert_freeze_ms = int(getattr(app, "alert_freeze", None).get() if hasattr(app, "alert_freeze") else 1500)
-        alert_when_inside = int(p.get("alert_zone_inside", 1))  # 1=in zone (default), 0=outside
+        alert_when_inside = int(p.get("alert_zone_inside", 1))  # 1=in zone, 0=outside
 
         app._log(f"Param: imgsz={imgsz}, conf={conf}, iou={iou}, frame_skip={frame_skip}, "
                  f"track_buffer={track_buffer}, match={match_thresh}, hits={min_hits}, device={device}")
@@ -331,6 +339,10 @@ def run(app, sources, outp: Path, selected_idx):
             fps = cap.get(cv2.CAP_PROP_FPS); fps = fps if fps and fps>1e-3 else 25.0
             W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
             H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
+
+            # start „zegarków” dla timecode/clock
+            start_perf = time.perf_counter()
+            start_epoch = time.time()
 
             # --- Edytor liczników ---
             if is_stream:
@@ -373,6 +385,31 @@ def run(app, sources, outp: Path, selected_idx):
             alert_state = {"last_ms": 0}
             trails = {} if trace_on else None  # tid -> deque[(x,y)]
 
+            def _frame_timing(is_stream_local: bool) -> tuple[float, str, str]:
+                """
+                Zwraca: (time_sec, timecode_str, clock_str)
+                - LIVE: sec = elapsed(perf), timecode=mm:ss, clock=YYYY-mm-dd HH:MM:SS
+                - FILE: sec = CAP_PROP_POS_MSEC/1000 (fallback: frame_idx/fps), timecode=mm:ss, clock=""
+                """
+                if is_stream_local:
+                    sec = time.perf_counter() - start_perf
+                    tc = _fmt_timecode(sec)
+                    clk = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_epoch + sec))
+                    return sec, tc, clk
+                # offline
+                pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+                if pos_ms and pos_ms > 0:
+                    sec = float(pos_ms) / 1000.0
+                else:
+                    # fallback: przy frame skip liczymy z indeksu ramki przeliczonego na czas
+                    cur_idx = cap.get(cv2.CAP_PROP_POS_FRAMES)
+                    if cur_idx and cur_idx > 0 and fps > 0:
+                        sec = float(cur_idx) / float(fps)
+                    else:
+                        sec = 0.0
+                tc = _fmt_timecode(sec)
+                return sec, tc, ""
+
             def _handle_frame(frame, frame_idx):
                 # Inference
                 res = app.model(frame, imgsz=imgsz, conf=conf, iou=iou,
@@ -401,6 +438,9 @@ def run(app, sources, outp: Path, selected_idx):
                         det_cids  = cls.astype(int).tolist()
                         det_ids   = list(range(1, len(det_boxes)+1))
 
+                # Timing do zdarzeń (jeden raz na klatkę)
+                sec, tc, clk = _frame_timing(is_stream)
+
                 # Liczenie + alerty
                 anchors = _process_frame_counting(
                     app, frame_idx, fps, id2name,
@@ -410,10 +450,11 @@ def run(app, sources, outp: Path, selected_idx):
                     line_min_gap, anchor_mode,
                     alert_enabled, alert_classes_set, alert_freq, alert_dur,
                     alert_state, alert_freeze_ms,
-                    alert_when_inside
+                    alert_when_inside,
+                    sec, tc, clk
                 )
 
-                # Aktualizacja śladów
+                # Ślady
                 if trails is not None:
                     for tid, a in zip(det_ids, anchors):
                         dq = trails.get(tid)
@@ -424,7 +465,7 @@ def run(app, sources, outp: Path, selected_idx):
 
                 overlay = frame
 
-                # Detekcje — wywołanie zgodnie z sygnaturą z cv_video_overlay.py (tylko pozycje!)
+                # Detekcje
                 try:
                     draw_detections(overlay, det_boxes, det_confs, det_cids, det_ids,
                                     id2name, (overlay_mode or "centroid"),
@@ -432,7 +473,7 @@ def run(app, sources, outp: Path, selected_idx):
                 except Exception:
                     pass
 
-                # Ramki (linie/strefy) + ślady + etykiety liczników
+                # Ramki (linie/strefy) + ślady + napisy liczników
                 _draw_lines_zones(overlay, lines_cfg, zones_cfg, frame_color, frame_thickness)
                 _draw_trails(overlay, trails, trace_color, trace_thickness)
                 _draw_counts_labels(overlay, lines_cfg, line_counts, zones_cfg, zone_counts)
@@ -440,6 +481,7 @@ def run(app, sources, outp: Path, selected_idx):
                 return overlay
 
             processed = 0
+            # first_frame (offline)
             if not is_stream and 'first_frame' in locals() and first_frame is not None:
                 if (processed % stride) == 0:
                     ov = _handle_frame(first_frame, processed)
