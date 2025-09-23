@@ -335,10 +335,22 @@ class App(AppUIMixin, tk.Tk):
 
     # ========== OPCJE ZAAWANSOWANE (z presetami) ==========
     def open_advanced(self):
-        win = tk.Toplevel(self); win.title("Opcje zaawansowane"); win.geometry("680x720")
+        """
+        Okno 'Opcje zaawansowane' – minimalny, zgodny z obecnym projektem:
+        - trace_color / trace_thickness
+        - overlay_frame_color / overlay_frame_thickness
+        - alert_zone_inside (1=w strefie, 0=poza)
+        - standardowe pola z presetów (imgsz/conf/iou/frame_skip/...).
+        """
+        from tkinter import colorchooser
 
+        win = tk.Toplevel(self)
+        win.title("Opcje zaawansowane")
+        win.geometry("700x780")
+
+        # Baza z presetów lub aktualnego override
         p = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
-        base = self.adv_params if self.advanced_override else {
+        base = self.adv_params if getattr(self, "advanced_override", False) else {
             **p,
             "line_min_gap": LINE_MIN_GAP_FRAMES_DEFAULT,
             "line_min_sep": LINE_MIN_SEP_PX_DEFAULT,
@@ -353,16 +365,22 @@ class App(AppUIMixin, tk.Tk):
             "alert_freq": int(self.alert_freq.get()),
             "alert_dur": int(self.alert_dur.get()),
             "alert_freeze": int(self.alert_freeze.get()),
+            # nowe (domyślne)
+            "trace_color": str(self.adv_params.get("trace_color", "auto")) if getattr(self, "advanced_override", False) else "auto",
+            "trace_thickness": int(self.adv_params.get("trace_thickness", 2)) if getattr(self, "advanced_override", False) else 2,
+            "overlay_frame_color": str(self.adv_params.get("overlay_frame_color", "auto")) if getattr(self, "advanced_override", False) else "auto",
+            "overlay_frame_thickness": int(self.adv_params.get("overlay_frame_thickness", 2)) if getattr(self, "advanced_override", False) else 2,
+            "alert_zone_inside": int(self.adv_params.get("alert_zone_inside", 1)) if getattr(self, "advanced_override", False) else 1,
         }
 
-        def add_row(parent, lbl, var, w=18):
-            f = tk.Frame(parent); f.pack(fill="x", pady=4)
-            tk.Label(f, text=lbl, width=26, anchor="w").pack(side="left")
-            e = tk.Entry(f, textvariable=var, width=w); e.pack(side="left")
-            return e
+        def row(parent, label, var, w=18):
+            f = tk.Frame(parent); f.pack(fill="x", pady=3)
+            tk.Label(f, text=label, width=26, anchor="w").pack(side="left")
+            ent = tk.Entry(f, textvariable=var, width=w); ent.pack(side="left")
+            return f, ent
 
-        # --- Detekcja / Tracking / Histereza ---
-        frame_basic = tk.LabelFrame(win, text="Detekcja / Tracking / Histereza"); frame_basic.pack(fill="x", padx=8, pady=6)
+        # --- Sekcja: Detekcja/Tracking/Histereza ---
+        frm_basic = tk.LabelFrame(win, text="Detekcja / Tracking / Histereza"); frm_basic.pack(fill="x", padx=8, pady=6)
         v_imgsz = tk.StringVar(value=str(base.get("imgsz", "")))
         v_conf  = tk.StringVar(value=str(base.get("conf", "")))
         v_iou   = tk.StringVar(value=str(base.get("iou", "")))
@@ -373,72 +391,97 @@ class App(AppUIMixin, tk.Tk):
         v_lgap  = tk.StringVar(value=str(base.get("line_min_gap", "")))
         v_lsep  = tk.StringVar(value=str(base.get("line_min_sep", "")))
         v_zhgap = tk.StringVar(value=str(base.get("zone_min_gap", "")))
-        add_row(frame_basic, "imgsz", v_imgsz)
-        add_row(frame_basic, "conf", v_conf)
-        add_row(frame_basic, "iou", v_iou)
-        add_row(frame_basic, "frame_skip", v_skip)
-        add_row(frame_basic, "track_buffer", v_buf)
-        add_row(frame_basic, "match_thresh", v_match)
-        add_row(frame_basic, "min_hits", v_hits)
-        add_row(frame_basic, "line_min_gap_frames", v_lgap)
-        add_row(frame_basic, "line_min_sep_px", v_lsep)
-        add_row(frame_basic, "zone_min_gap_frames", v_zhgap)
+        for lab, var in [("imgsz",v_imgsz),("conf",v_conf),("iou",v_iou),("frame_skip",v_skip),
+                         ("track_buffer",v_buf),("match_thresh",v_match),("min_hits",v_hits),
+                         ("line_min_gap_frames",v_lgap),("line_min_sep_px",v_lsep),("zone_min_gap_frames",v_zhgap)]:
+            row(frm_basic, lab, var)
 
-        # --- Wizualizacja / Trace / Anchor / Ghost ---
-        frame_vis = tk.LabelFrame(win, text="Wizualizacja / Trace / Anchor / Ghost"); frame_vis.pack(fill="x", padx=8, pady=6)
+        # --- Sekcja: Wizualizacja / Trace / Anchor / Ghost ---
+        frm_vis = tk.LabelFrame(win, text="Wizualizacja / Trace / Anchor / Ghost"); frm_vis.pack(fill="x", padx=8, pady=6)
         v_prev  = tk.BooleanVar(value=bool(base.get("preview_enabled", True)))
         v_trace = tk.BooleanVar(value=bool(base.get("trace_enabled", True)))
         v_tlen  = tk.IntVar(value=int(base.get("trace_len", 24)))
         v_anch  = tk.StringVar(value=str(base.get("anchor_mode", "center")))
         v_ghost = tk.IntVar(value=int(base.get("ghost_margin", 12)))
-        tk.Checkbutton(frame_vis, text="Włącz podgląd LIVE", variable=v_prev).pack(side="left", padx=6, pady=4)
-        tk.Checkbutton(frame_vis, text="Trace", variable=v_trace).pack(side="left", padx=(12,4))
-        tk.Label(frame_vis, text="len:").pack(side="left")
-        tk.Spinbox(frame_vis, from_=0, to=300, width=5, textvariable=v_tlen).pack(side="left", padx=(2, 12))
-        tk.Label(frame_vis, text="Anchor:").pack(side="left")
-        ttk.Combobox(frame_vis, values=["bottom","center"], width=8, state="readonly",
+        tk.Checkbutton(frm_vis, text="Włącz podgląd LIVE", variable=v_prev).pack(side="left", padx=6, pady=4)
+        tk.Checkbutton(frm_vis, text="Trace", variable=v_trace).pack(side="left", padx=(12,4))
+        tk.Label(frm_vis, text="len:").pack(side="left")
+        tk.Spinbox(frm_vis, from_=0, to=300, width=5, textvariable=v_tlen).pack(side="left", padx=(2, 12))
+        tk.Label(frm_vis, text="Anchor:").pack(side="left")
+        ttk.Combobox(frm_vis, values=["bottom","center"], width=8, state="readonly",
                      textvariable=v_anch).pack(side="left", padx=(3, 12))
-        tk.Label(frame_vis, text="Ghost margin (px):").pack(side="left")
-        tk.Spinbox(frame_vis, from_=0, to=64, width=5, textvariable=v_ghost).pack(side="left", padx=(3, 6))
+        tk.Label(frm_vis, text="Ghost margin (px):").pack(side="left")
+        tk.Spinbox(frm_vis, from_=0, to=64, width=5, textvariable=v_ghost).pack(side="left", padx=(3, 6))
 
-        # --- Alert dźwiękowy (strefy) ---
-        frame_alert = tk.LabelFrame(win, text="Alert dźwiękowy (strefy)"); frame_alert.pack(fill="x", padx=8, pady=6)
+        # --- Sekcja: Kolory/grubości + color pickery ---
+        frm_colors = tk.LabelFrame(win, text="Kolory/grubości (wizualizacja)"); frm_colors.pack(fill="x", padx=8, pady=6)
+        v_tcolor = tk.StringVar(value=str(base.get("trace_color", "auto")))
+        v_tth    = tk.IntVar(value=int(base.get("trace_thickness", 2)))
+        v_fcolor = tk.StringVar(value=str(base.get("overlay_frame_color", "auto")))
+        v_fth    = tk.IntVar(value=int(base.get("overlay_frame_thickness", 2)))
+
+        r1, _ = row(frm_colors, "Kolor śladu (auto/#RRGGBB/B,G,R)", v_tcolor, w=18)
+        tk.Button(r1, text="Wybierz…", command=lambda: _pick_to_var(v_tcolor)).pack(side="left", padx=6)
+        f = tk.Frame(frm_colors); f.pack(fill="x", pady=2)
+        tk.Label(f, text="Grubość śladu (px)", width=26, anchor="w").pack(side="left")
+        tk.Spinbox(f, from_=0, to=16, width=6, textvariable=v_tth).pack(side="left")
+
+        r2, _ = row(frm_colors, "Kolor ramki (auto/#RRGGBB/B,G,R)", v_fcolor, w=18)
+        tk.Button(r2, text="Wybierz…", command=lambda: _pick_to_var(v_fcolor)).pack(side="left", padx=6)
+        f2 = tk.Frame(frm_colors); f2.pack(fill="x", pady=2)
+        tk.Label(f2, text="Grubość ramki (px)", width=26, anchor="w").pack(side="left")
+        tk.Spinbox(f2, from_=0, to=16, width=6, textvariable=v_fth).pack(side="left")
+
+        def _pick_to_var(var):
+            try:
+                init = var.get().strip()
+                rgb, hexv = colorchooser.askcolor(initialcolor=init if init.startswith("#") else None,
+                                                  title="Wybierz kolor")
+                if hexv: var.set(hexv.upper())
+            except Exception:
+                pass
+
+        # --- Sekcja: Alert dźwiękowy (strefy) ---
+        frm_alert = tk.LabelFrame(win, text="Alert dźwiękowy (strefy)"); frm_alert.pack(fill="x", padx=8, pady=6)
         v_a_en   = tk.BooleanVar(value=bool(base.get("alert_enabled", False)))
-        v_a_cls  = tk.StringVar(value=str(base.get("alert_classes", "cat,person")))
+        v_a_cls  = tk.StringVar(value=str(base.get("alert_classes", "person")))
         v_a_freq = tk.IntVar(value=int(base.get("alert_freq", 880)))
         v_a_dur  = tk.IntVar(value=int(base.get("alert_dur", 180)))
         v_a_free = tk.IntVar(value=int(base.get("alert_freeze", 1500)))
-        tk.Checkbutton(frame_alert, text="Włącz alert", variable=v_a_en).pack(side="left", padx=6)
-        tk.Label(frame_alert, text="Klasy (CSV):").pack(side="left")
-        tk.Entry(frame_alert, textvariable=v_a_cls, width=22).pack(side="left", padx=(3, 10))
-        tk.Label(frame_alert, text="Hz:").pack(side="left")
-        tk.Spinbox(frame_alert, from_=200, to=4000, width=6, textvariable=v_a_freq).pack(side="left", padx=(3, 10))
-        tk.Label(frame_alert, text="ms:").pack(side="left")
-        tk.Spinbox(frame_alert, from_=30, to=2000, width=6, textvariable=v_a_dur).pack(side="left", padx=(3, 10))
-        tk.Label(frame_alert, text="freeze (ms):").pack(side="left")
-        tk.Spinbox(frame_alert, from_=0, to=10000, width=7, textvariable=v_a_free).pack(side="left", padx=(3, 6))
+        v_a_where= tk.IntVar(value=int(base.get("alert_zone_inside", 1)))  # 1=inside, 0=outside
+        tk.Checkbutton(frm_alert, text="Włącz alert", variable=v_a_en).pack(side="left", padx=6)
+        tk.Label(frm_alert, text="Klasy (CSV):").pack(side="left")
+        tk.Entry(frm_alert, textvariable=v_a_cls, width=22).pack(side="left", padx=(3, 10))
+        tk.Label(frm_alert, text="Hz:").pack(side="left")
+        tk.Spinbox(frm_alert, from_=200, to=4000, width=6, textvariable=v_a_freq).pack(side="left", padx=(3, 10))
+        tk.Label(frm_alert, text="ms:").pack(side="left")
+        tk.Spinbox(frm_alert, from_=30, to=2000, width=6, textvariable=v_a_dur).pack(side="left", padx=(3, 10))
+        tk.Label(frm_alert, text="freeze (ms):").pack(side="left")
+        tk.Spinbox(frm_alert, from_=0, to=10000, width=7, textvariable=v_a_free).pack(side="left", padx=(3, 6))
+        f3 = tk.Frame(frm_alert); f3.pack(fill="x", padx=6, pady=4)
+        tk.Label(f3, text="Tryb:", width=8, anchor="w").pack(side="left")
+        tk.Radiobutton(f3, text="w strefie", variable=v_a_where, value=1).pack(side="left", padx=(3,2))
+        tk.Radiobutton(f3, text="poza strefą", variable=v_a_where, value=0).pack(side="left", padx=(3,2))
 
-        # --- agregacja pól ---
-        def _collect_from_fields() -> dict:
+        # ---- zapis/odczyt pól ----
+        def _collect() -> dict:
             cur = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
-            def get_or(var, cast, key, default):
-                s = var.get().strip() if isinstance(var, tk.StringVar) else str(var.get())
-                if s != "":
-                    try: return cast(s)
-                    except Exception: raise ValueError(f"Pole '{key}' ma nieprawidłową wartość: {s}")
-                return default if key not in cur else cur[key]
-            data = {
-                "imgsz": get_or(v_imgsz, int,   "imgsz",        960),
-                "conf":  get_or(v_conf,  float, "conf",         0.60),
-                "iou":   get_or(v_iou,   float, "iou",          0.50),
-                "frame_skip":   get_or(v_skip,  int,   "frame_skip",   1),
-                "track_buffer": get_or(v_buf,   int,   "track_buffer", 60),
-                "match_thresh": get_or(v_match, float, "match_thresh", 0.78),
-                "min_hits":     get_or(v_hits,  int,   "min_hits",     2),
+            def _get(var, cast, key, dflt):
+                s = var.get().strip()
+                if s == "": return cur.get(key, dflt)
+                try: return cast(s)
+                except Exception: return dflt
+            return {
+                "imgsz": _get(v_imgsz, int,   "imgsz",        640),
+                "conf":  _get(v_conf,  float, "conf",         0.5),
+                "iou":   _get(v_iou,   float, "iou",          0.6),
+                "frame_skip":   _get(v_skip,  int,   "frame_skip",   1),
+                "track_buffer": _get(v_buf,   int,   "track_buffer", 60),
+                "match_thresh": _get(v_match, float, "match_thresh", 0.78),
+                "min_hits":     _get(v_hits,  int,   "min_hits",     2),
                 "line_min_gap": int(v_lgap.get().strip() or LINE_MIN_GAP_FRAMES_DEFAULT),
                 "line_min_sep": int(v_lsep.get().strip() or LINE_MIN_SEP_PX_DEFAULT),
                 "zone_min_gap": int(v_zhgap.get().strip() or ZONE_MIN_GAP_FRAMES_DEFAULT),
-                # extra (wizualizacja / alert)
                 "preview_enabled": bool(v_prev.get()),
                 "trace_enabled": bool(v_trace.get()),
                 "trace_len": int(v_tlen.get()),
@@ -449,70 +492,19 @@ class App(AppUIMixin, tk.Tk):
                 "alert_freq": int(v_a_freq.get()),
                 "alert_dur": int(v_a_dur.get()),
                 "alert_freeze": int(v_a_free.get()),
+                "trace_color": v_tcolor.get().strip(),
+                "trace_thickness": int(v_tth.get()),
+                "overlay_frame_color": v_fcolor.get().strip(),
+                "overlay_frame_thickness": int(v_fth.get()),
+                "alert_zone_inside": int(v_a_where.get()),
             }
-            return data
-
-        PRESETS_DIR = Path(__file__).parent / "presets"
-        PRESETS_DIR.mkdir(exist_ok=True)
-
-        def do_save_preset():
-            try:
-                data = _collect_from_fields()
-            except Exception as e:
-                messagebox.showerror("Preset", str(e)); return
-            defname = f"preset_q{self.quality.get()}.json"
-            path = filedialog.asksaveasfilename(
-                title="Zapisz preset (JSON)",
-                defaultextension=".json",
-                initialdir=str(PRESETS_DIR),
-                initialfile=defname,
-                filetypes=[("JSON","*.json")]
-            )
-            if not path: return
-            try:
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                self._log(f"[ADV] Zapisano preset: {path}")
-            except Exception as e:
-                messagebox.showerror("Zapisz preset", str(e))
-
-        def do_load_preset():
-            path = filedialog.askopenfilename(
-                title="Wczytaj preset (JSON)",
-                initialdir=str(PRESETS_DIR),
-                filetypes=[("JSON","*.json"), ("Wszystkie","*.*")]
-            )
-            if not path: return
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                for key, var in [
-                    ("imgsz", v_imgsz), ("conf", v_conf), ("iou", v_iou),
-                    ("frame_skip", v_skip), ("track_buffer", v_buf),
-                    ("match_thresh", v_match), ("min_hits", v_hits),
-                    ("line_min_gap", v_lgap), ("line_min_sep", v_lsep), ("zone_min_gap", v_zhgap),
-                ]:
-                    if key in data: var.set(str(data[key]))
-                if "preview_enabled" in data: v_prev.set(bool(data["preview_enabled"]))
-                if "trace_enabled" in data:  v_trace.set(bool(data["trace_enabled"]))
-                if "trace_len" in data:      v_tlen.set(int(data["trace_len"]))
-                if "anchor_mode" in data:    v_anch.set(str(data["anchor_mode"]))
-                if "ghost_margin" in data:   v_ghost.set(int(data["ghost_margin"]))
-                if "alert_enabled" in data:  v_a_en.set(bool(data["alert_enabled"]))
-                if "alert_classes" in data:  v_a_cls.set(str(data["alert_classes"]))
-                if "alert_freq" in data:     v_a_freq.set(int(data["alert_freq"]))
-                if "alert_dur" in data:      v_a_dur.set(int(data["alert_dur"]))
-                if "alert_freeze" in data:   v_a_free.set(int(data["alert_freeze"]))
-                self._log(f"[ADV] Wczytano preset: {path}")
-            except Exception as e:
-                messagebox.showerror("Wczytaj preset", str(e))
 
         def _apply():
             try:
-                params = _collect_from_fields()
+                params = _collect()
                 self.adv_params = params
                 self.advanced_override = True
-                # przepisz „extra” do zmiennych aplikacji (używa ich run)
+                # zsynchronizuj z polami używanymi w run()
                 self.preview_enabled.set(params["preview_enabled"])
                 self.trace_enabled.set(params["trace_enabled"])
                 self.trace_len.set(params["trace_len"])
@@ -523,7 +515,7 @@ class App(AppUIMixin, tk.Tk):
                 self.alert_freq.set(params["alert_freq"])
                 self.alert_dur.set(params["alert_dur"])
                 self.alert_freeze.set(params["alert_freeze"])
-                self._log("[ADV] Zastosowano override (z pól/preset).")
+                self._log("[ADV] Zastosowano override (z pól).")
                 win.destroy()
             except Exception as e:
                 messagebox.showerror("Adv", str(e))
@@ -533,12 +525,12 @@ class App(AppUIMixin, tk.Tk):
             self._log("[ADV] Przywrócono preset z suwaka jakości.")
             win.destroy()
 
-        # Przyciski
         btns = tk.Frame(win); btns.pack(fill="x", pady=10)
         tk.Button(btns, text="Zastosuj", command=_apply).pack(side="left", padx=6)
         tk.Button(btns, text="Przywróć preset z suwaka", command=_reset).pack(side="left", padx=6)
-        tk.Button(btns, text="Zapisz preset…", command=do_save_preset).pack(side="right", padx=6)
-        tk.Button(btns, text="Wczytaj preset…", command=do_load_preset).pack(side="right", padx=6)
+
+
+
 
     # ========== START / ABORT ==========
     def abort(self):

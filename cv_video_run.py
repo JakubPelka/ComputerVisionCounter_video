@@ -1,4 +1,4 @@
-# cv_video_run.py — trace/frame color+thickness (advanced) + zone alert invert (0/1)
+# cv_video_run.py — zone alert inside/outside + trace/frame color/thickness (ADV) + custom counters + proper draw_detections
 from __future__ import annotations
 from pathlib import Path
 import time, re as _re, threading
@@ -6,7 +6,7 @@ import cv2, numpy as np, pandas as pd
 from collections import deque
 
 from cv_video_gui import CounterEditor
-from cv_video_overlay import draw_detections, draw_counters
+from cv_video_overlay import draw_detections  # draw_counters is not used anymore to avoid double drawing
 from cv_video_core import (
     ensure_dir, device_auto_str, open_video_writer_collision,
     save_json_collision, save_csv_collision,
@@ -130,32 +130,30 @@ def _make_bytetrack(conf: float, track_buffer: int, match_thresh: float, min_hit
 
 # ---------- Drawing helpers ----------
 def _draw_lines_zones(frame, lines_cfg, zones_cfg, frame_color, frame_thickness):
-    """Rysuje same krawędzie (bez etykiet) – by uniknąć duplikatów."""
-    if frame_thickness is not None and frame_thickness <= 0:
+    """Rysuje linie i strefy JEDEN raz, bez etykiet (kolor/grubość z ADV)."""
+    th = int(frame_thickness if frame_thickness is not None else 2)
+    if th <= 0:
         return
-    th = int(frame_thickness or 2)
     # Linie
-    for ln in lines_cfg or []:
+    for ln in (lines_cfg or []):
         a = tuple(map(int, ln["a"])); b = tuple(map(int, ln["b"]))
-        col = frame_color if frame_color is not None else tuple(int(c) for c in ln.get("color", (0,255,255)))
+        col = frame_color if frame_color is not None else (0,165,255)
         cv2.line(frame, a, b, col, th, cv2.LINE_AA)
     # Strefy
-    for zn in zones_cfg or []:
+    for zn in (zones_cfg or []):
         pts = np.array(zn["pts"], dtype=np.int32)
         if len(pts) >= 3:
-            col = frame_color if frame_color is not None else tuple(int(c) for c in zn.get("color", (0,200,255)))
+            col = frame_color if frame_color is not None else (0,165,255)
             cv2.polylines(frame, [pts], True, col, th, cv2.LINE_AA)
 
 def _draw_trails(frame, trails, trace_color, trace_thickness):
-    """Prosty renderer śladów. trace_thickness=0 → brak śladów."""
     th = int(trace_thickness if trace_thickness is not None else 2)
-    if th <= 0 or not trails:
+    if not trails or th <= 0:
         return
     for tid, dq in trails.items():
         if len(dq) < 2:
             continue
         if trace_color is None:
-            # stabilny „auto” kolor na bazie id
             r = (37 * tid) % 256; g = (91 * tid) % 256; b = (157 * tid) % 256
             col = (int(b), int(g), int(r))
         else:
@@ -163,32 +161,21 @@ def _draw_trails(frame, trails, trace_color, trace_thickness):
         pts = np.array(dq, dtype=np.int32)
         cv2.polylines(frame, [pts], False, col, th, cv2.LINE_AA)
 
-def _safe_draw_counters(frame, lines_cfg, line_counts, zones_cfg, zone_counts):
-    ok = False
-    try:
-        draw_counters(frame, lines_cfg, line_counts, zones_cfg, zone_counts, None)
-        ok = True
-    except TypeError:
-        try:
-            draw_counters(frame, lines_cfg, line_counts, zones_cfg, zone_counts)
-            ok = True
-        except Exception:
-            ok = False
-    if ok:
-        return
-    # Fallback HUD
-    x, y = 12, 24
-    cv2.rectangle(frame, (6,6), (420, max(36, y + 18*(len(lines_cfg)+len(zones_cfg))+12)), (0,0,0), -1)
-    cv2.putText(frame, "Counters", (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2, cv2.LINE_AA)
-    y += 24
+def _draw_counts_labels(frame, lines_cfg, line_counts, zones_cfg, zone_counts):
+    # Proste napisy w miejscach sensownych: środek linii i centroid wielokąta
+    # Linia
     for i, ln in enumerate(lines_cfg or []):
-        txt = f"[L{i+1}:{ln.get('name','')}] AB:{line_counts[i]['ab']}  BA:{line_counts[i]['ba']}"
-        cv2.putText(frame, txt, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200,255,200), 2, cv2.LINE_AA)
-        y += 18
+        ax, ay = ln["a"]; bx, by = ln["b"]
+        cx = int((ax + bx) / 2); cy = int((ay + by) / 2)
+        s = f"{ln['name']}  A→B:{line_counts[i]['ab']}  B→A:{line_counts[i]['ba']}"
+        cv2.putText(frame, s, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,200,255), 2, cv2.LINE_AA)
+    # Strefa
     for i, zn in enumerate(zones_cfg or []):
-        txt = f"[Z{i+1}:{zn.get('name','')}] IN:{zone_counts[i]['in']}  OUT:{zone_counts[i]['out']}"
-        cv2.putText(frame, txt, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200,220,255), 2, cv2.LINE_AA)
-        y += 18
+        pts = np.array(zn["pts"], dtype=np.int32)
+        if len(pts) >= 3:
+            cx = int(np.mean(pts[:,0])); cy = int(np.mean(pts[:,1]))
+            s = f"{zn['name']}  IN:{zone_counts[i]['in']} OUT:{zone_counts[i]['out']}"
+            cv2.putText(frame, s, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,200,255), 2, cv2.LINE_AA)
 
 # ---------- Anchors & events ----------
 def _anchor_from_box(b, mode: str):
@@ -292,10 +279,9 @@ def run(app, sources, outp: Path, selected_idx):
         cnt_dir  = ensure_dir(outp / "counters")
         ensure_dir(outp / "temp")
 
-        p = VIDEO_PRESETS.get(int(app.quality.get()), DEFAULT_QUALITY).copy()
+        p = VIDEO_PRESETS.get(int(app.quality.get()), VIDEO_PRESETS.get(DEFAULT_QUALITY)).copy()
         if getattr(app, "advanced_override", False):
             p.update(app.adv_params)
-
         imgsz = int(p["imgsz"]); conf = float(p["conf"]); iou = float(p["iou"])
         frame_skip = int(p["frame_skip"]); stride = max(1, frame_skip + 1)
         track_buffer = int(p["track_buffer"]); match_thresh = float(p["match_thresh"]); min_hits = int(p["min_hits"])
@@ -306,8 +292,9 @@ def run(app, sources, outp: Path, selected_idx):
         id2name = names if isinstance(names, dict) else {i:nm for i,nm in enumerate(names)}
         select_names = [id2name[i] for i in selected_idx]
         anchor_mode = getattr(app, "anchor_mode", None).get() if hasattr(app, "anchor_mode") else "bottom"
+        overlay_mode = getattr(app, "overlay_mode", None).get() if hasattr(app, "overlay_mode") else "centroid"
 
-        # --- TRACE & FRAME (ADVANCED) ---
+        # TRACE & FRAME (ADVANCED)
         trace_on = getattr(app, "trace_enabled", None).get() if hasattr(app, "trace_enabled") else True
         trace_len = int(getattr(app, "trace_len", None).get() if hasattr(app, "trace_len") else 24)
         trace_color = _parse_color(p.get("trace_color", None))
@@ -316,7 +303,7 @@ def run(app, sources, outp: Path, selected_idx):
         frame_color = _parse_color(p.get("overlay_frame_color", None))
         frame_thickness = int(p.get("overlay_frame_thickness", 2)) if str(p.get("overlay_frame_thickness","")).strip() != "" else 2
 
-        # --- ALERTS ---
+        # ALERTS
         alert_enabled = getattr(app, "alert_enabled", None).get() if hasattr(app, "alert_enabled") else False
         raw_classes = (getattr(app, "alert_classes", None).get() if hasattr(app, "alert_classes") else "person")
         alert_classes_set = set([c.strip().lower() for c in raw_classes.split(",") if c.strip()])
@@ -325,18 +312,10 @@ def run(app, sources, outp: Path, selected_idx):
         alert_freeze_ms = int(getattr(app, "alert_freeze", None).get() if hasattr(app, "alert_freeze") else 1500)
         alert_when_inside = int(p.get("alert_zone_inside", 1))  # 1=in zone (default), 0=outside
 
-        app._log(
-            "Param: imgsz=%s, conf=%s, iou=%s, frame_skip=%s, track_buffer=%s, match=%s, hits=%s, device=%s" %
-            (imgsz, conf, iou, frame_skip, track_buffer, match_thresh, min_hits, device)
-        )
-        app._log(
-            "Tracker: bytetrack | Klasy: %s | Alert=%s (%s, freeze=%sms, zone_mode=%s)" %
-            (', '.join(select_names),
-             'ON' if alert_enabled else 'OFF',
-             ', '.join(sorted(alert_classes_set)) if alert_classes_set else '*',
-             alert_freeze_ms,
-             'INSIDE' if alert_when_inside else 'OUTSIDE')
-        )
+        app._log(f"Param: imgsz={imgsz}, conf={conf}, iou={iou}, frame_skip={frame_skip}, "
+                 f"track_buffer={track_buffer}, match={match_thresh}, hits={min_hits}, device={device}")
+        app._log(f"Tracker: bytetrack | Klasy: {', '.join(select_names)} | "
+                 f"Alert={'ON' if alert_enabled else 'OFF'} ({', '.join(sorted(alert_classes_set)) or '*'}, freeze={alert_freeze_ms}ms, zone_mode={'INSIDE' if alert_when_inside else 'OUTSIDE'})")
 
         for vi, source in enumerate(sources):
             src_name = (str(source) if not isinstance(source, (int,)) else f"cam_{source}")
@@ -391,7 +370,7 @@ def run(app, sources, outp: Path, selected_idx):
             zone_states = [{ } for _ in zones_cfg]
             zone_counts = [{"in":0,"out":0} for _ in zones_cfg]
             events = []
-            alert_state = {"last_ms": 0}  # globalny cooldown beep
+            alert_state = {"last_ms": 0}
             trails = {} if trace_on else None  # tid -> deque[(x,y)]
 
             def _handle_frame(frame, frame_idx):
@@ -443,25 +422,20 @@ def run(app, sources, outp: Path, selected_idx):
                             trails[tid] = dq
                         dq.append((int(a[0]), int(a[1])))
 
-                # Rysunek in-place (preview + zapis)
                 overlay = frame
-                # pudełka/ID (zgodne z różnymi sygnaturami)
+
+                # Detekcje — wywołanie zgodnie z sygnaturą z cv_video_overlay.py (tylko pozycje!)
                 try:
-                    draw_detections(overlay, det_boxes, det_confs, det_cids, det_ids, id2name, lines_cfg, zones_cfg, None)
-                except TypeError:
-                    try:
-                        draw_detections(overlay, det_boxes, det_confs, det_cids, det_ids, id2name)
-                    except Exception:
-                        pass
+                    draw_detections(overlay, det_boxes, det_confs, det_cids, det_ids,
+                                    id2name, (overlay_mode or "centroid"),
+                                    None, True, anchors)
                 except Exception:
                     pass
 
-                # Linie/strefy (bez etykiet, nadpisywalny kolor/grubość)
+                # Ramki (linie/strefy) + ślady + etykiety liczników
                 _draw_lines_zones(overlay, lines_cfg, zones_cfg, frame_color, frame_thickness)
-                # Ślady (nadpisywalny kolor/grubość)
                 _draw_trails(overlay, trails, trace_color, trace_thickness)
-                # Liczniki (fallback HUD, jeśli Twoja funkcja ma inną sygnaturę)
-                _safe_draw_counters(overlay, lines_cfg, line_counts, zones_cfg, zone_counts)
+                _draw_counts_labels(overlay, lines_cfg, line_counts, zones_cfg, zone_counts)
 
                 return overlay
 
