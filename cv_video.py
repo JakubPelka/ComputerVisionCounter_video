@@ -345,6 +345,9 @@ class App(AppUIMixin, tk.Tk):
         from tkinter import colorchooser
 
         win = tk.Toplevel(self)
+        win.transient(self)     # trzymaj nad głównym
+        win.grab_set()          # modalnie (nie „ucieknie” pod spód)
+        win.lift(); win.focus_force()
         win.title("Opcje zaawansowane")
         win.geometry("700x780")
 
@@ -435,33 +438,49 @@ class App(AppUIMixin, tk.Tk):
         def _pick_to_var(var):
             try:
                 init = var.get().strip()
-                rgb, hexv = colorchooser.askcolor(initialcolor=init if init.startswith("#") else None,
-                                                  title="Wybierz kolor")
-                if hexv: var.set(hexv.upper())
+                # parent=win -> picker nad "Zaawansowane"
+                rgb, hexv = colorchooser.askcolor(
+                    initialcolor=init if init.startswith("#") else None,
+                    title="Wybierz kolor",
+                    parent=win
+                )
+                if hexv:
+                    var.set(hexv.upper())
+                win.lift(); win.focus_force()  # po zamknięciu pickera "Zaawansowane" wraca na wierzch
             except Exception:
                 pass
 
         # --- Sekcja: Alert dźwiękowy (strefy) ---
-        frm_alert = tk.LabelFrame(win, text="Alert dźwiękowy (strefy)"); frm_alert.pack(fill="x", padx=8, pady=6)
+        # --- Alert dźwiękowy (strefy) ---
+        frame_alert = tk.LabelFrame(win, text="Alert dźwiękowy (strefy)")
+        frame_alert.pack(fill="x", padx=8, pady=6)
+
+        # [WAŻNE] Definicje zmiennych (muszą być przed budową wierszy)
         v_a_en   = tk.BooleanVar(value=bool(base.get("alert_enabled", False)))
         v_a_cls  = tk.StringVar(value=str(base.get("alert_classes", "person")))
         v_a_freq = tk.IntVar(value=int(base.get("alert_freq", 880)))
         v_a_dur  = tk.IntVar(value=int(base.get("alert_dur", 180)))
         v_a_free = tk.IntVar(value=int(base.get("alert_freeze", 1500)))
         v_a_where= tk.IntVar(value=int(base.get("alert_zone_inside", 1)))  # 1=inside, 0=outside
-        tk.Checkbutton(frm_alert, text="Włącz alert", variable=v_a_en).pack(side="left", padx=6)
-        tk.Label(frm_alert, text="Klasy (CSV):").pack(side="left")
-        tk.Entry(frm_alert, textvariable=v_a_cls, width=22).pack(side="left", padx=(3, 10))
-        tk.Label(frm_alert, text="Hz:").pack(side="left")
-        tk.Spinbox(frm_alert, from_=200, to=4000, width=6, textvariable=v_a_freq).pack(side="left", padx=(3, 10))
-        tk.Label(frm_alert, text="ms:").pack(side="left")
-        tk.Spinbox(frm_alert, from_=30, to=2000, width=6, textvariable=v_a_dur).pack(side="left", padx=(3, 10))
-        tk.Label(frm_alert, text="freeze (ms):").pack(side="left")
-        tk.Spinbox(frm_alert, from_=0, to=10000, width=7, textvariable=v_a_free).pack(side="left", padx=(3, 6))
-        f3 = tk.Frame(frm_alert); f3.pack(fill="x", padx=6, pady=4)
-        tk.Label(f3, text="Tryb:", width=8, anchor="w").pack(side="left")
-        tk.Radiobutton(f3, text="w strefie", variable=v_a_where, value=1).pack(side="left", padx=(3,2))
-        tk.Radiobutton(f3, text="poza strefą", variable=v_a_where, value=0).pack(side="left", padx=(3,2))
+
+        # RZĄD 1: włącznik + klasy + Hz/ms/freeze (jeden wiersz)
+        r1 = tk.Frame(frame_alert); r1.pack(fill="x", padx=6, pady=2)
+        tk.Checkbutton(r1, text="Włącz alert", variable=v_a_en).pack(side="left", padx=(0,8))
+        tk.Label(r1, text="Klasy (CSV):").pack(side="left")
+        tk.Entry(r1, textvariable=v_a_cls, width=22).pack(side="left", padx=(3, 10))
+        tk.Label(r1, text="Hz:").pack(side="left")
+        tk.Spinbox(r1, from_=200, to=4000, width=6, textvariable=v_a_freq).pack(side="left", padx=(3, 10))
+        tk.Label(r1, text="ms:").pack(side="left")
+        tk.Spinbox(r1, from_=30, to=2000, width=6, textvariable=v_a_dur).pack(side="left", padx=(3, 10))
+        tk.Label(r1, text="freeze (ms):").pack(side="left")
+        tk.Spinbox(r1, from_=0, to=10000, width=7, textvariable=v_a_free).pack(side="left", padx=(3, 6))
+
+        # RZĄD 2: TRYB (dokładnie POD rzędem 1)
+        r2 = tk.Frame(frame_alert); r2.pack(fill="x", padx=6, pady=(6,4))
+        tk.Label(r2, text="Tryb:", width=8, anchor="w").pack(side="left")
+        tk.Radiobutton(r2, text="w strefie",  variable=v_a_where, value=1).pack(side="left", padx=(3,12))
+        tk.Radiobutton(r2, text="poza strefą", variable=v_a_where, value=0).pack(side="left", padx=(3,2))
+
 
         # ---- zapis/odczyt pól ----
         def _collect() -> dict:
