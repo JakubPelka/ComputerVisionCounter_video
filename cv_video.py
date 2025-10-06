@@ -1,6 +1,6 @@
-# cv_video.py — compact UI + dynamic class grid (up to 12 columns) + presets (preview/trace/anchor/ghost/alert)
+# cv_video.py — compact UI + dynamic class grid (up to 12 columns) + presets + interactive help
 from __future__ import annotations
-import threading, sys, json
+import threading, sys
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -25,6 +25,12 @@ try:
 except Exception as e:
     print("Ultralytics check:", e, file=sys.stderr)
 
+# ---------- Branding & default paths ----------
+APP_NAME = "ComputerVisionCounter VIDEO"
+PROJECT_ROOT = Path(__file__).parent.resolve()
+DEFAULT_IN_DIR = PROJECT_ROOT / "indata"
+DEFAULT_OUT_DIR = ensure_dir(PROJECT_ROOT / "output")          # auto-create on import
+DEFAULT_MODELS_DIR = PROJECT_ROOT / MODEL_DIRNAME
 
 # -------------------- Context help (shown in the right panel) --------------------
 ADV_HELP_INTRO = (
@@ -124,13 +130,13 @@ class App(AppUIMixin, tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title("ComputerVisionCounter VIDEO – line/zone counting (YOLO + ByteTrack)")
+        self.title(f"{APP_NAME} — line/zone counting (YOLO + ByteTrack)")
         self.geometry("980x720")
 
-        # --- GUI variables ---
-        self.input_dir = tk.StringVar()
-        self.output_dir = tk.StringVar()
-        models_default = Path(__file__).parent / MODEL_DIRNAME
+        # --- GUI variables (with better defaults) ---
+        self.input_dir = tk.StringVar(value=str(DEFAULT_IN_DIR) if DEFAULT_IN_DIR.exists() else "")
+        self.output_dir = tk.StringVar(value=str(DEFAULT_OUT_DIR))  # always defaults to ./output
+        models_default = DEFAULT_MODELS_DIR
         self.weights_path = tk.StringVar(value=str(find_best_weights(models_default) or models_default))
 
         self.quality = tk.IntVar(value=DEFAULT_QUALITY)
@@ -206,7 +212,7 @@ class App(AppUIMixin, tk.Tk):
         self.files_label = tk.Label(f_files, text="— none —"); self.files_label.pack(side="left", padx=8)
         tk.Button(f_files, text="Clear selection", command=self.clear_files).pack(side="left", padx=(8,0))
 
-        self._row_browse(root, "Output folder (optional):", self.output_dir, self.browse_output, is_dir=True)
+        self._row_browse(root, "Output folder (default: ./output):", self.output_dir, self.browse_output, is_dir=True)
         self._row_browse(root, "Weights (.pt/.zip):", self.weights_path, self.browse_weights, is_dir=False)
 
         # Source (compact)
@@ -281,12 +287,17 @@ class App(AppUIMixin, tk.Tk):
 
     # ========== model loading logic ==========
     def browse_input(self):
-        d = filedialog.askdirectory(title="Choose input video folder")
+        initdir = str(DEFAULT_IN_DIR if DEFAULT_IN_DIR.exists() else PROJECT_ROOT)
+        d = filedialog.askdirectory(title="Choose input video folder", initialdir=initdir)
         if d: self.input_dir.set(d)
 
     def browse_files(self):
-        files = filedialog.askopenfilenames(title="Select video files",
-                                            filetypes=[("Video","*.mp4 *.mov *.avi *.mkv *.m4v *.wmv *.mpg *.mpeg *.ts")])
+        initdir = str(DEFAULT_IN_DIR if DEFAULT_IN_DIR.exists() else PROJECT_ROOT)
+        files = filedialog.askopenfilenames(
+            title="Select video files",
+            initialdir=initdir,
+            filetypes=[("Video","*.mp4 *.mov *.avi *.mkv *.m4v *.wmv *.mpg *.mpeg *.ts")]
+        )
         if files:
             self.selected_files = list(files); self.files_label.config(text=f"Selected {len(self.selected_files)} files")
         else:
@@ -296,11 +307,15 @@ class App(AppUIMixin, tk.Tk):
         self.selected_files = []; self.files_label.config(text="— none —")
 
     def browse_output(self):
-        d = filedialog.askdirectory(title="Choose output folder")
-        if d: self.output_dir.set(d)
+        initdir = str(DEFAULT_OUT_DIR)
+        d = filedialog.askdirectory(title="Choose output folder", initialdir=initdir)
+        if d:
+            self.output_dir.set(d)
+            try: ensure_dir(Path(d))
+            except Exception: pass
 
     def browse_weights(self):
-        initdir = str(Path(self.weights_path.get()).parent) if self.weights_path.get() else str(Path(__file__).parent / MODEL_DIRNAME)
+        initdir = str(DEFAULT_MODELS_DIR)
         f = filedialog.askopenfilename(initialdir=initdir, title="Choose weights",
                                        filetypes=[("Weights",".pt .zip"), ("All","*.*")])
         if f:
@@ -310,7 +325,7 @@ class App(AppUIMixin, tk.Tk):
         try:
             wp = self.weights_path.get().strip()
             if not wp or Path(wp).is_dir():
-                best = find_best_weights(Path(wp) if wp else (Path(__file__).parent / MODEL_DIRNAME))
+                best = find_best_weights(DEFAULT_MODELS_DIR)
                 if best: self.weights_path.set(str(best))
             if self.weights_path.get(): self.load_model_and_classes()
         except Exception:
@@ -318,7 +333,7 @@ class App(AppUIMixin, tk.Tk):
 
     def load_model_and_classes(self):
         try:
-            out_dir = ensure_dir((Path(self.output_dir.get().strip()) if self.output_dir.get().strip() else Path.cwd()) / "results")
+            out_dir = ensure_dir(Path(self.output_dir.get().strip()) if self.output_dir.get().strip() else DEFAULT_OUT_DIR)
             temp_root = ensure_dir(out_dir / "temp"); extract_dir = ensure_dir(temp_root / "extracted_models")
 
             wp = Path(self.weights_path.get().strip())
@@ -337,13 +352,7 @@ class App(AppUIMixin, tk.Tk):
 
     # ========== classes (dynamic grid) ==========
     def _populate_classes(self, names):
-        """
-        Draw a grid of checkboxes. Each column gets equal width computed
-        from the current canvas width — the layout fills the whole area
-        evenly (no “cut” last column).
-        """
         container = self.classes_scroll.inner
-
         previously_selected = set(idx for (_nm, var, idx) in getattr(self, "class_vars", []) if var.get())
         for w in container.winfo_children():
             w.destroy()
@@ -418,7 +427,7 @@ class App(AppUIMixin, tk.Tk):
         win.transient(self)
         win.grab_set()
         win.lift(); win.focus_force()
-        win.title("Advanced options")
+        win.title(f"Advanced options — {APP_NAME}")
         win.geometry("980x780")
 
         # two-pane layout
@@ -484,8 +493,7 @@ class App(AppUIMixin, tk.Tk):
         def row(parent, label, var, w=18, key: str|None=None):
             f = tk.Frame(parent); f.pack(fill="x", pady=3)
             tk.Label(f, text=label, width=26, anchor="w").pack(side="left")
-            ent = tk.Entry(f, textvariable=var, width=w)
-            ent.pack(side="left")
+            ent = tk.Entry(f, textvariable=var, width=w); ent.pack(side="left")
             if key: attach_help(ent, key)
             return f, ent
 
@@ -526,18 +534,6 @@ class App(AppUIMixin, tk.Tk):
         v_fcolor = tk.StringVar(value=str(base.get("overlay_frame_color", "auto")))
         v_fth    = tk.IntVar(value=int(base.get("overlay_frame_thickness", 2)))
 
-        r1, ent_tcolor = row(frm_colors, "Trace color (auto/#RRGGBB/B,G,R)", v_tcolor, w=18, key="trace_color")
-        tk.Button(r1, text="Pick…", command=lambda: _pick_to_var(v_tcolor)).pack(side="left", padx=6)
-        f = tk.Frame(frm_colors); f.pack(fill="x", pady=2)
-        tk.Label(f, text="Trace thickness (px)", width=26, anchor="w").pack(side="left")
-        sp_tth = tk.Spinbox(f, from_=0, to=16, width=6, textvariable=v_tth); sp_tth.pack(side="left"); attach_help(sp_tth, "trace_thickness")
-
-        r2, ent_fcolor = row(frm_colors, "Frame color (auto/#RRGGBB/B,G,R)", v_fcolor, w=18, key="overlay_frame_color")
-        tk.Button(r2, text="Pick…", command=lambda: _pick_to_var(v_fcolor)).pack(side="left", padx=6)
-        f2 = tk.Frame(frm_colors); f2.pack(fill="x", pady=2)
-        tk.Label(f2, text="Frame thickness (px)", width=26, anchor="w").pack(side="left")
-        sp_fth = tk.Spinbox(f2, from_=0, to=16, width=6, textvariable=v_fth); sp_fth.pack(side="left"); attach_help(sp_fth, "overlay_frame_thickness")
-
         def _pick_to_var(var):
             try:
                 init = var.get().strip()
@@ -548,6 +544,22 @@ class App(AppUIMixin, tk.Tk):
                 win.lift(); win.focus_force()
             except Exception:
                 pass
+
+        r1 = tk.Frame(frm_colors); r1.pack(fill="x", pady=3)
+        tk.Label(r1, text="Trace color (auto/#RRGGBB/B,G,R)", width=26, anchor="w").pack(side="left")
+        ent_tcolor = tk.Entry(r1, textvariable=v_tcolor, width=18); ent_tcolor.pack(side="left"); attach_help(ent_tcolor, "trace_color")
+        tk.Button(r1, text="Pick…", command=lambda: _pick_to_var(v_tcolor)).pack(side="left", padx=6)
+        f = tk.Frame(frm_colors); f.pack(fill="x", pady=2)
+        tk.Label(f, text="Trace thickness (px)", width=26, anchor="w").pack(side="left")
+        sp_tth = tk.Spinbox(f, from_=0, to=16, width=6, textvariable=v_tth); sp_tth.pack(side="left"); attach_help(sp_tth, "trace_thickness")
+
+        r2 = tk.Frame(frm_colors); r2.pack(fill="x", pady=3)
+        tk.Label(r2, text="Frame color (auto/#RRGGBB/B,G,R)", width=26, anchor="w").pack(side="left")
+        ent_fcolor = tk.Entry(r2, textvariable=v_fcolor, width=18); ent_fcolor.pack(side="left"); attach_help(ent_fcolor, "overlay_frame_color")
+        tk.Button(r2, text="Pick…", command=lambda: _pick_to_var(v_fcolor)).pack(side="left", padx=6)
+        f2 = tk.Frame(frm_colors); f2.pack(fill="x", pady=2)
+        tk.Label(f2, text="Frame thickness (px)", width=26, anchor="w").pack(side="left")
+        sp_fth = tk.Spinbox(f2, from_=0, to=16, width=6, textvariable=v_fth); sp_fth.pack(side="left"); attach_help(sp_fth, "overlay_frame_thickness")
 
         # --- Sound alert (zones) ---
         frame_alert = tk.LabelFrame(left, text="Sound alert (zones)"); frame_alert.pack(fill="x", padx=0, pady=6)
@@ -692,7 +704,7 @@ class App(AppUIMixin, tk.Tk):
                     sources = [Path(p) for p in self.selected_files]
                     base_in = sources[0].parent if sources and isinstance(sources[0], Path) else None
                 else:
-                    inp = Path(self.input_dir.get().strip())
+                    inp = Path(self.input_dir.get().strip()) if self.input_dir.get().strip() else (DEFAULT_IN_DIR if DEFAULT_IN_DIR.exists() else PROJECT_ROOT)
                     if not inp.exists():
                         messagebox.showerror("Input", "Select a valid folder or files.")
                         self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
@@ -712,8 +724,8 @@ class App(AppUIMixin, tk.Tk):
                 messagebox.showwarning("Classes", "Select at least one class.")
                 self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
 
-            out_base = Path(self.output_dir.get().strip()) if self.output_dir.get().strip() else (base_in or Path.cwd())
-            outp = ensure_dir(out_base / "results")
+            out_base = Path(self.output_dir.get().strip()) if self.output_dir.get().strip() else DEFAULT_OUT_DIR
+            outp = ensure_dir(out_base)  # <— save inside ./output by default
 
             self.worker_done.clear()
             self.worker_thread = threading.Thread(target=core_run, args=(self, sources, outp, selected_idx), daemon=True)
@@ -759,7 +771,7 @@ class App(AppUIMixin, tk.Tk):
         if self._preview_win and (self._preview_win.winfo_exists()):
             return
         win = tk.Toplevel(self)
-        win.title("Preview (LIVE)")
+        win.title(f"Preview (LIVE) — {APP_NAME}")
         win.geometry("860x520")
         win.protocol("WM_DELETE_WINDOW", lambda: self._destroy_preview_window())
         lbl = tk.Label(win, anchor="center", bg="#111")
