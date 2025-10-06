@@ -1,4 +1,5 @@
-# cv_video.py — compact UI + dynamic class grid (up to 12 columns) + presets + interactive help
+# cv_video.py — compact UI + dynamic class grid + presets + interactive help
+# Default folders + custom alert sound + robust entrypoint with error popup/log
 from __future__ import annotations
 import threading, sys
 from pathlib import Path
@@ -31,8 +32,9 @@ PROJECT_ROOT = Path(__file__).parent.resolve()
 DEFAULT_IN_DIR = PROJECT_ROOT / "indata"
 DEFAULT_OUT_DIR = ensure_dir(PROJECT_ROOT / "output")          # auto-create on import
 DEFAULT_MODELS_DIR = PROJECT_ROOT / MODEL_DIRNAME
+DEFAULT_SOUNDS_DIR = ensure_dir(PROJECT_ROOT / "sounds")       # auto-create; used for sound browser
 
-# -------------------- Context help (shown in the right panel) --------------------
+# -------------------- Context help (right panel) --------------------
 ADV_HELP_INTRO = (
     "Click or hover any field to see a short explanation and tips.\n\n"
     "Quick tips:\n"
@@ -105,28 +107,26 @@ ADV_HELP_BY_KEY = {
     "overlay_frame_thickness": ("Frame thickness",
                                 "Line width in pixels (0–16). 0 hides frame lines."),
 
-    # Sound alert
+    # Sound alert (uses selected classes from the main window)
     "alert_enabled": ("Enable alert",
-                      "Turn zone beeps on/off."),
-    "alert_classes": ("Classes (CSV)",
-                      "Which classes trigger sound. Comma-separated names.\n"
-                      "Empty = any class."),
-    "alert_freq": ("Hz",
-                   "Beep pitch (frequency). Higher = higher pitch."),
-    "alert_dur": ("ms",
-                  "Beep length (milliseconds)."),
-    "alert_freeze": ("freeze (ms)",
-                     "Cool-down between beeps so it doesn't beep constantly."),
+                      "Turn zone/line sound on or off. Uses currently selected classes."),
+    "alert_sound": ("Alert sound file",
+                    "Pick a WAV/MP3 file to play for alerts. Works on macOS, Linux, and Windows.\n"
+                    "Tip: WAV is the most reliable everywhere."),
+    "alert_loop": ("Loop while active",
+                   "If ON: keeps playing sound while a target matches the condition.\n"
+                   "If OFF: plays single pings, rate-limited by 'freeze (s)'."),
+    "alert_freeze_s": ("freeze (s)",
+                       "Minimum time in seconds between two sound starts (for pings or loop restarts)."),
     "alert_zone_inside": ("Mode",
-                          "Choose when to beep: inside the zone or outside the zone."),
+                          "Choose when to play: inside the zone or outside the zone."),
 }
 
 
 class App(AppUIMixin, tk.Tk):
-    # --- class grid configuration ---
     CLASS_COL_MIN = 2
     CLASS_COL_MAX = 12
-    CLASS_CELL_PX = 160  # target width of a single column (approx.)
+    CLASS_CELL_PX = 160
 
     def __init__(self):
         super().__init__()
@@ -135,7 +135,7 @@ class App(AppUIMixin, tk.Tk):
 
         # --- GUI variables (with better defaults) ---
         self.input_dir = tk.StringVar(value=str(DEFAULT_IN_DIR) if DEFAULT_IN_DIR.exists() else "")
-        self.output_dir = tk.StringVar(value=str(DEFAULT_OUT_DIR))  # always defaults to ./output
+        self.output_dir = tk.StringVar(value=str(DEFAULT_OUT_DIR))
         models_default = DEFAULT_MODELS_DIR
         self.weights_path = tk.StringVar(value=str(find_best_weights(models_default) or models_default))
 
@@ -145,7 +145,7 @@ class App(AppUIMixin, tk.Tk):
 
         self.model = None; self.names = None; self.class_vars = []
         self.selected_files = []
-        self._class_cols = 5   # updated dynamically
+        self._class_cols = 5
 
         # --- advanced / preset-able ---
         self.advanced_override = False
@@ -160,17 +160,21 @@ class App(AppUIMixin, tk.Tk):
             "line_min_gap": LINE_MIN_GAP_FRAMES_DEFAULT,
             "line_min_sep": LINE_MIN_SEP_PX_DEFAULT,
             "zone_min_gap": ZONE_MIN_GAP_FRAMES_DEFAULT,
-            # extras (in presets)
             "preview_enabled": True,
             "trace_enabled": True,
             "trace_len": 24,
-            "anchor_mode": "center",    # "bottom"|"center"
+            "anchor_mode": "center",
             "ghost_margin": 24,
             "alert_enabled": False,
-            "alert_classes": "cat,person",
-            "alert_freq": 880,
-            "alert_dur": 180,
-            "alert_freeze": 1500,
+            # NEW sound settings:
+            "alert_freeze_s": 2,   # seconds between sound starts
+            "alert_zone_inside": 1,  # 1 = inside zone, 0 = outside zone
+            "alert_sound": "",       # path to wav/mp3
+            "alert_loop": True,      # loop while active
+            "trace_color": "auto",
+            "trace_thickness": 2,
+            "overlay_frame_color": "auto",
+            "overlay_frame_thickness": 2,
         }
 
         # bindings (used by run)
@@ -180,12 +184,11 @@ class App(AppUIMixin, tk.Tk):
         self.anchor_mode     = tk.StringVar(value=self.adv_params["anchor_mode"])
         self.ghost_margin    = tk.IntVar(value=self.adv_params["ghost_margin"])
         self.alert_enabled   = tk.BooleanVar(value=self.adv_params["alert_enabled"])
-        self.alert_classes   = tk.StringVar(value=self.adv_params["alert_classes"])
-        self.alert_freq      = tk.IntVar(value=self.adv_params["alert_freq"])
-        self.alert_dur       = tk.IntVar(value=self.adv_params["alert_dur"])
-        self.alert_freeze    = tk.IntVar(value=self.adv_params["alert_freeze"])
+        self.alert_freeze_s  = tk.IntVar(value=self.adv_params["alert_freeze_s"])
+        self.alert_sound     = tk.StringVar(value=self.adv_params["alert_sound"])
+        self.alert_loop      = tk.BooleanVar(value=self.adv_params["alert_loop"])
 
-        # --- progress/worker + preview window ---
+        # progress / worker / preview
         self.progress_var = tk.DoubleVar(value=0.0)
         self.progress_label = tk.StringVar(value="Ready.")
         self.abort_event = threading.Event()
@@ -197,7 +200,7 @@ class App(AppUIMixin, tk.Tk):
         self._preview_lbl = None
         self._preview_imgtk = None
 
-        # --- build UI ---
+        # build UI
         self.build_ui_compact()
         self._autoload_best_model()
 
@@ -215,7 +218,7 @@ class App(AppUIMixin, tk.Tk):
         self._row_browse(root, "Output folder (default: ./output):", self.output_dir, self.browse_output, is_dir=True)
         self._row_browse(root, "Weights (.pt/.zip):", self.weights_path, self.browse_weights, is_dir=False)
 
-        # Source (compact)
+        # Source
         srcf = tk.LabelFrame(root, text="Input source"); srcf.pack(fill="x", pady=4)
         self.src_mode = tk.StringVar(value="files"); self.cam_index = tk.StringVar(value="0"); self.url_input = tk.StringVar(value="")
         def _src_toggle(*_):
@@ -250,7 +253,7 @@ class App(AppUIMixin, tk.Tk):
         tk.Radiobutton(tr, text="ByteTrack", variable=self.tracker_kind, value="bytetrack").pack(side="left", padx=6)
         tk.Radiobutton(tr, text="BoT-SORT", variable=self.tracker_kind, value="botsort").pack(side="left", padx=6)
 
-        # Class selection — scrollable & compact + DYNAMIC COLUMNS
+        # Class selection
         lf = tk.LabelFrame(root, text="Class selection (after loading weights)"); lf.pack(fill="both", expand=True, pady=4)
         self.classes_scroll = ScrollableFrame(lf, height=220)
         self.classes_scroll.pack(fill="both", expand=True)
@@ -260,7 +263,7 @@ class App(AppUIMixin, tk.Tk):
         bf = tk.Frame(root); bf.pack(fill="x", pady=6)
         self.btn_start = tk.Button(bf, text="START", command=self.start); self.btn_start.pack(side="left")
         tk.Button(bf, text="Advanced options…", command=self.open_advanced).pack(side="left", padx=8)
-        self.btn_abort = tk.Button(bf, text="ABORT", command=self.abort, state="disabled"); self.btn_abort.pack(side="left", padx=(8,0))
+        self.btn_abort = tk.Button(bf, text="ABORT", state="disabled", command=self.abort); self.btn_abort.pack(side="left", padx=(8,0))
 
         pf = tk.Frame(root); pf.pack(fill="x", pady=(0,4))
         self.progressbar = ttk.Progressbar(pf, maximum=100.0, variable=self.progress_var, mode="determinate")
@@ -345,7 +348,7 @@ class App(AppUIMixin, tk.Tk):
             pt = resolve_weights_to_pt(wp, extract_dir)
             self._log(f"Loading model: {pt}")
             self.model = YOLO(str(pt)); self.names = self.model.names
-            self._populate_classes(self.names)  # initial grid draw
+            self._populate_classes(self.names)
             self._log("Weights and class list loaded.")
         except Exception as e:
             messagebox.showerror("Model", f"Cannot load weights:\n{e}")
@@ -428,7 +431,7 @@ class App(AppUIMixin, tk.Tk):
         win.grab_set()
         win.lift(); win.focus_force()
         win.title(f"Advanced options — {APP_NAME}")
-        win.geometry("980x780")
+        win.geometry("1000x780")
 
         # two-pane layout
         root = tk.Frame(win); root.pack(fill="both", expand=True)
@@ -456,7 +459,6 @@ class App(AppUIMixin, tk.Tk):
         set_help("Tips", ADV_HELP_INTRO)
 
         def attach_help(widget, key: str):
-            """Bind hover/focus events to show mapped help."""
             title, body = ADV_HELP_BY_KEY.get(key, (key, ""))
             def _show(_e=None, t=title, b=body):
                 set_help(t, b)
@@ -479,21 +481,22 @@ class App(AppUIMixin, tk.Tk):
             "anchor_mode": self.anchor_mode.get(),
             "ghost_margin": int(self.ghost_margin.get()),
             "alert_enabled": bool(self.alert_enabled.get()),
-            "alert_classes": self.alert_classes.get(),
-            "alert_freq": int(self.alert_freq.get()),
-            "alert_dur": int(self.alert_dur.get()),
-            "alert_freeze": int(self.alert_freeze.get()),
+            "alert_freeze_s": int(self.alert_freeze_s.get()),
+            "alert_zone_inside": 1,
             "trace_color": str(self.adv_params.get("trace_color", "auto")) if getattr(self, "advanced_override", False) else "auto",
             "trace_thickness": int(self.adv_params.get("trace_thickness", 2)) if getattr(self, "advanced_override", False) else 2,
             "overlay_frame_color": str(self.adv_params.get("overlay_frame_color", "auto")) if getattr(self, "advanced_override", False) else "auto",
             "overlay_frame_thickness": int(self.adv_params.get("overlay_frame_thickness", 2)) if getattr(self, "advanced_override", False) else 2,
-            "alert_zone_inside": int(self.adv_params.get("alert_zone_inside", 1)) if getattr(self, "advanced_override", False) else 1,
+            # NEW:
+            "alert_sound": self.alert_sound.get(),
+            "alert_loop": bool(self.alert_loop.get()),
         }
 
         def row(parent, label, var, w=18, key: str|None=None):
             f = tk.Frame(parent); f.pack(fill="x", pady=3)
             tk.Label(f, text=label, width=26, anchor="w").pack(side="left")
-            ent = tk.Entry(f, textvariable=var, width=w); ent.pack(side="left")
+            ent = tk.Entry(f, textvariable=var, width=w)
+            ent.pack(side="left")
             if key: attach_help(ent, key)
             return f, ent
 
@@ -537,7 +540,6 @@ class App(AppUIMixin, tk.Tk):
         def _pick_to_var(var):
             try:
                 init = var.get().strip()
-                from tkinter import colorchooser
                 rgb, hexv = colorchooser.askcolor(initialcolor=init if init.startswith("#") else None, title="Pick a color", parent=win)
                 if hexv:
                     var.set(hexv.upper())
@@ -561,31 +563,37 @@ class App(AppUIMixin, tk.Tk):
         tk.Label(f2, text="Frame thickness (px)", width=26, anchor="w").pack(side="left")
         sp_fth = tk.Spinbox(f2, from_=0, to=16, width=6, textvariable=v_fth); sp_fth.pack(side="left"); attach_help(sp_fth, "overlay_frame_thickness")
 
-        # --- Sound alert (zones) ---
-        frame_alert = tk.LabelFrame(left, text="Sound alert (zones)"); frame_alert.pack(fill="x", padx=0, pady=6)
+        # --- Sound alert (zones/lines) ---
+        frame_alert = tk.LabelFrame(left, text="Sound alert"); frame_alert.pack(fill="x", padx=0, pady=6)
 
-        v_a_en   = tk.BooleanVar(value=bool(base.get("alert_enabled", False)))
-        v_a_cls  = tk.StringVar(value=str(base.get("alert_classes", "person")))
-        v_a_freq = tk.IntVar(value=int(base.get("alert_freq", 880)))
-        v_a_dur  = tk.IntVar(value=int(base.get("alert_dur", 180)))
-        v_a_free = tk.IntVar(value=int(base.get("alert_freeze", 1500)))
-        v_a_where= tk.IntVar(value=int(base.get("alert_zone_inside", 1)))  # 1=inside, 0=outside
+        v_a_en    = tk.BooleanVar(value=bool(base.get("alert_enabled", False)))
+        v_a_freeS = tk.IntVar(value=int(base.get("alert_freeze_s", 2)))
+        v_a_where = tk.IntVar(value=int(base.get("alert_zone_inside", 1)))  # 1=inside, 0=outside
+        v_a_sound = tk.StringVar(value=str(base.get("alert_sound", "")))
+        v_a_loop  = tk.BooleanVar(value=bool(base.get("alert_loop", True)))
 
         r1 = tk.Frame(frame_alert); r1.pack(fill="x", padx=6, pady=2)
-        cb_a_en = tk.Checkbutton(r1, text="Enable alert", variable=v_a_en); cb_a_en.pack(side="left", padx=(0,8)); attach_help(cb_a_en, "alert_enabled")
-        tk.Label(r1, text="Classes (CSV):").pack(side="left")
-        ent_a_cls = tk.Entry(r1, textvariable=v_a_cls, width=22); ent_a_cls.pack(side="left", padx=(3, 10)); attach_help(ent_a_cls, "alert_classes")
-        tk.Label(r1, text="Hz:").pack(side="left")
-        sp_a_hz = tk.Spinbox(r1, from_=200, to=4000, width=6, textvariable=v_a_freq); sp_a_hz.pack(side="left", padx=(3, 10)); attach_help(sp_a_hz, "alert_freq")
-        tk.Label(r1, text="ms:").pack(side="left")
-        sp_a_ms = tk.Spinbox(r1, from_=30, to=2000, width=6, textvariable=v_a_dur); sp_a_ms.pack(side="left", padx=(3, 10)); attach_help(sp_a_ms, "alert_dur")
-        tk.Label(r1, text="freeze (ms):").pack(side="left")
-        sp_a_fr = tk.Spinbox(r1, from_=0, to=10000, width=7, textvariable=v_a_free); sp_a_fr.pack(side="left", padx=(3, 6)); attach_help(sp_a_fr, "alert_freeze")
+        cb_a_en = tk.Checkbutton(r1, text="Enable alert (uses selected classes)", variable=v_a_en); cb_a_en.pack(side="left", padx=(0,8)); attach_help(cb_a_en, "alert_enabled")
 
-        r2 = tk.Frame(frame_alert); r2.pack(fill="x", padx=6, pady=(6,4))
-        tk.Label(r2, text="Mode:", width=8, anchor="w").pack(side="left")
-        rb_in  = tk.Radiobutton(r2, text="inside zone",  variable=v_a_where, value=1); rb_in.pack(side="left", padx=(3,12)); attach_help(rb_in, "alert_zone_inside")
-        rb_out = tk.Radiobutton(r2, text="outside zone", variable=v_a_where, value=0); rb_out.pack(side="left", padx=(3,2)); attach_help(rb_out, "alert_zone_inside")
+        r2 = tk.Frame(frame_alert); r2.pack(fill="x", padx=6, pady=2)
+        tk.Label(r2, text="Sound file:", width=12, anchor="w").pack(side="left")
+        ent_a_path = tk.Entry(r2, textvariable=v_a_sound, width=36); ent_a_path.pack(side="left", padx=(3, 6)); attach_help(ent_a_path, "alert_sound")
+        def _pick_sound():
+            initdir = str(DEFAULT_SOUNDS_DIR if DEFAULT_SOUNDS_DIR.exists() else PROJECT_ROOT)
+            fpath = filedialog.askopenfilename(initialdir=initdir, title="Choose alert sound (wav/mp3)",
+                                               filetypes=[("Audio","*.wav *.mp3 *.ogg *.flac *.m4a"), ("All","*.*")])
+            if fpath: v_a_sound.set(fpath)
+        tk.Button(r2, text="Browse…", command=_pick_sound).pack(side="left")
+
+        r3 = tk.Frame(frame_alert); r3.pack(fill="x", padx=6, pady=2)
+        cb_loop = tk.Checkbutton(r3, text="Loop while active", variable=v_a_loop); cb_loop.pack(side="left", padx=(0,12)); attach_help(cb_loop, "alert_loop")
+        tk.Label(r3, text="freeze (s):").pack(side="left")
+        sp_a_free = tk.Spinbox(r3, from_=0, to=60, width=5, textvariable=v_a_freeS); sp_a_free.pack(side="left", padx=(3, 6)); attach_help(sp_a_free, "alert_freeze_s")
+
+        r4 = tk.Frame(frame_alert); r4.pack(fill="x", padx=6, pady=(6,4))
+        tk.Label(r4, text="Mode:", width=8, anchor="w").pack(side="left")
+        rb_in  = tk.Radiobutton(r4, text="inside zone",  variable=v_a_where, value=1); rb_in.pack(side="left", padx=(3,12)); attach_help(rb_in, "alert_zone_inside")
+        rb_out = tk.Radiobutton(r4, text="outside zone", variable=v_a_where, value=0); rb_out.pack(side="left", padx=(3,2)); attach_help(rb_out, "alert_zone_inside")
 
         # ---- read/write fields ----
         def _collect() -> dict:
@@ -611,15 +619,15 @@ class App(AppUIMixin, tk.Tk):
                 "trace_len": int(v_tlen.get()),
                 "anchor_mode": v_anch.get(),
                 "ghost_margin": int(v_ghost.get()),
-                "alert_enabled": bool(v_a_en.get()),
-                "alert_classes": v_a_cls.get(),
-                "alert_freq": int(v_a_freq.get()),
-                "alert_dur": int(v_a_dur.get()),
-                "alert_freeze": int(v_a_free.get()),
                 "trace_color": v_tcolor.get().strip(),
                 "trace_thickness": int(v_tth.get()),
                 "overlay_frame_color": v_fcolor.get().strip(),
                 "overlay_frame_thickness": int(v_fth.get()),
+                # Sound (uses selected classes)
+                "alert_enabled": bool(v_a_en.get()),
+                "alert_sound": v_a_sound.get().strip(),
+                "alert_loop": bool(v_a_loop.get()),
+                "alert_freeze_s": int(v_a_freeS.get()),
                 "alert_zone_inside": int(v_a_where.get()),
             }
 
@@ -635,10 +643,9 @@ class App(AppUIMixin, tk.Tk):
                 self.anchor_mode.set(params["anchor_mode"])
                 self.ghost_margin.set(params["ghost_margin"])
                 self.alert_enabled.set(params["alert_enabled"])
-                self.alert_classes.set(params["alert_classes"])
-                self.alert_freq.set(params["alert_freq"])
-                self.alert_dur.set(params["alert_dur"])
-                self.alert_freeze.set(params["alert_freeze"])
+                self.alert_sound.set(params["alert_sound"])
+                self.alert_loop.set(params["alert_loop"])
+                self.alert_freeze_s.set(params["alert_freeze_s"])
                 self._log("[ADV] Applied override (from fields).")
                 win.destroy()
             except Exception as e:
@@ -725,7 +732,7 @@ class App(AppUIMixin, tk.Tk):
                 self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
 
             out_base = Path(self.output_dir.get().strip()) if self.output_dir.get().strip() else DEFAULT_OUT_DIR
-            outp = ensure_dir(out_base)  # <— save inside ./output by default
+            outp = ensure_dir(out_base)
 
             self.worker_done.clear()
             self.worker_thread = threading.Thread(target=core_run, args=(self, sources, outp, selected_idx), daemon=True)
@@ -814,5 +821,38 @@ class App(AppUIMixin, tk.Tk):
         self._preview_imgtk = None
 
 
+# ---- robust entrypoint with on-screen + file logging of startup errors ----
+def _safe_main():
+    import traceback, tkinter as _tk
+    from pathlib import Path as _P
+    log_dir = _P(__file__).parent / "output"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    log_file = log_dir / "ui_error.log"
+
+    try:
+        app = App()
+        app.mainloop()
+    except Exception:
+        # 1) dump full traceback to console
+        traceback.print_exc()
+        # 2) save to output/ui_error.log
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write("\n" + "="*60 + "\nFATAL UI ERROR\n")
+                f.write(traceback.format_exc())
+        except Exception:
+            pass
+        # 3) also show a Tk messagebox so you see it if console closes
+        try:
+            _r = _tk.Tk(); _r.withdraw()
+            from tkinter import messagebox as _mb
+            _mb.showerror(f"{APP_NAME} – startup error", traceback.format_exc())
+            _r.destroy()
+        except Exception:
+            pass
+
 if __name__ == "__main__":
-    app = App(); app.mainloop()
+    _safe_main()

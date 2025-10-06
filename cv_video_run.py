@@ -1,7 +1,7 @@
-# cv_video_run.py — events: frame + timecode (mm:ss / h:mm:ss) + clock (for LIVE)
+# cv_video_run.py — custom alert sound (cross-platform), uses selected classes, freeze in seconds
 from __future__ import annotations
 from pathlib import Path
-import time, re as _re, threading
+import time, re as _re, threading, subprocess, sys, os, shutil, signal
 import cv2, numpy as np, pandas as pd
 from collections import deque
 
@@ -18,15 +18,6 @@ try:
     import supervision as sv
 except Exception:
     sv = None
-
-# ---------- Beep (Windows only) ----------
-try:
-    import winsound
-    def _beep(freq, dur):
-        threading.Thread(target=lambda: winsound.Beep(int(freq), int(dur)), daemon=True).start()
-except Exception:
-    def _beep(freq, dur):
-        pass
 
 # ---------- Geometry ----------
 def line_side(a, b, p):
@@ -86,7 +77,6 @@ def _preview(app, frame_bgr, frame_idx, fps, total_frames):
         pass
 
 def _parse_color(val):
-    """None/''/'auto' → None; '#RRGGBB' (RGB) → BGR; 'B,G,R' → tuple."""
     if val is None: return None
     if isinstance(val, (tuple, list)) and len(val) == 3:
         b,g,r = val; return (int(b), int(g), int(r))
@@ -105,7 +95,6 @@ def _parse_color(val):
     return None
 
 def _fmt_timecode(sec: float) -> str:
-    """mm:ss or h:mm:ss if >= 1 hour."""
     if sec < 0: sec = 0.0
     s = int(round(sec))
     h = s // 3600
@@ -184,6 +173,204 @@ def _make_tracker(kind: str, conf: float, track_buffer: int, match_thresh: float
         return "ByteTrack (fallback)", bt
     return "ByteTrack", _make_bytetrack(conf, track_buffer, match_thresh, min_hits)
 
+# ---------- Sound player (cross-platform, incl. robust Windows) ----------
+class SoundPlayer:
+    """
+    Plays a custom sound file (wav/mp3/ogg/…).
+    Backends (in order):
+      - ffplay (best; supports stream_loop)
+      - macOS: afplay
+      - Linux: paplay/aplay (WAV likely)
+      - Windows: winsound (WAV, async + loop)  ⟵ robust & built-in
+      - Windows: PowerShell (WAV via SoundPlayer; MP3 via WMP COM)
+      - simpleaudio (WAV only, pure Python)
+    """
+    def __init__(self, path: str | None):
+        self.path = str(path) if path else None
+        self.proc: subprocess.Popen | None = None
+        self.play_obj = None  # simpleaudio
+        self.loop_thread: threading.Thread | None = None
+        self._loop_stop = threading.Event()
+        self._lock = threading.Lock()
+        self._ffplay = shutil.which("ffplay")
+        self._afplay = shutil.which("afplay") if sys.platform == "darwin" else None
+        self._paplay = shutil.which("paplay") if sys.platform.startswith("linux") else None
+        self._aplay  = shutil.which("aplay")  if sys.platform.startswith("linux") else None
+        self._is_win = sys.platform.startswith("win")
+        try:
+            from subprocess import CREATE_NEW_PROCESS_GROUP as _CF
+            self._win_createflags = _CF
+        except Exception:
+            self._win_createflags = 0
+        # winsound (Windows)
+        self._winsound = None
+        if self._is_win:
+            try:
+                import winsound  # type: ignore
+                self._winsound = winsound
+            except Exception:
+                self._winsound = None
+        # simpleaudio optional
+        self._sa = None
+        try:
+            import simpleaudio as sa  # type: ignore
+            self._sa = sa
+        except Exception:
+            self._sa = None
+
+    def describe_backends(self) -> str:
+        backs = []
+        if self._ffplay: backs.append("ffplay")
+        if self._afplay: backs.append("afplay")
+        if self._paplay: backs.append("paplay")
+        if self._aplay:  backs.append("aplay")
+        if self._winsound: backs.append("winsound")
+        backs.append("PowerShell" if self._is_win else "-")
+        if self._sa: backs.append("simpleaudio")
+        return ", ".join(b for b in backs if b and b != "-") or "none"
+
+    def _stop_proc(self):
+        if self.proc and self.proc.poll() is None:
+            try:
+                if self._is_win:
+                    self.proc.terminate()
+                else:
+                    os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
+            except Exception:
+                try: self.proc.kill()
+                except Exception: pass
+        self.proc = None
+
+    def stop(self):
+        with self._lock:
+            self._loop_stop.set()
+            # stop winsound loop if used
+            if self._winsound:
+                try:
+                    self._winsound.PlaySound(None, self._winsound.SND_PURGE)
+                except Exception:
+                    pass
+            if self.loop_thread and self.loop_thread.is_alive():
+                self._stop_proc()
+            self.loop_thread = None
+            if self.play_obj:
+                try: self.play_obj.stop()
+                except Exception: pass
+                self.play_obj = None
+            self._stop_proc()
+
+    def _spawn_once(self):
+        """Non-blocking play once via best available backend."""
+        if not self.path: return
+        # Preferred: ffplay (broad codecs)
+        if self._ffplay:
+            try:
+                self.proc = subprocess.Popen(
+                    [self._ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet", self.path],
+                    preexec_fn=(os.setsid if not self._is_win else None),
+                    creationflags=(self._win_createflags if self._is_win else 0),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                ); return
+            except Exception:
+                self.proc = None
+        # macOS afplay
+        if self._afplay:
+            try:
+                self.proc = subprocess.Popen(
+                    [self._afplay, self.path],
+                    preexec_fn=(os.setsid if not self._is_win else None),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                ); return
+            except Exception:
+                self.proc = None
+        # Linux paplay/aplay (WAV likely)
+        for cmd in (self._paplay, self._aplay):
+            if cmd:
+                try:
+                    self.proc = subprocess.Popen(
+                        [cmd, self.path],
+                        preexec_fn=(os.setsid if not self._is_win else None),
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    ); return
+                except Exception:
+                    self.proc = None
+        # Windows: winsound (WAV)
+        if self._winsound and self.path.lower().endswith(".wav"):
+            try:
+                self._winsound.PlaySound(self.path, self._winsound.SND_FILENAME | self._winsound.SND_ASYNC)
+                return
+            except Exception:
+                pass
+        # Windows PowerShell backends (WAV/MP3/etc.)
+        if self._is_win:
+            ps_path = self.path.replace("'", "''")
+            if self.path.lower().endswith(".wav"):
+                script = f"[System.Reflection.Assembly]::LoadWithPartialName('System.Media') | Out-Null; " \
+                         f"$p = New-Object System.Media.SoundPlayer('{ps_path}'); $p.PlaySync()"
+            else:
+                script = f"$w = New-Object -ComObject WMPlayer.OCX; " \
+                         f"$m = $w.newMedia('{ps_path}'); $w.URL = '{ps_path}'; " \
+                         f"$w.controls.play(); while ($w.playState -ne 1) {{ Start-Sleep -Milliseconds 100 }}; $w.close()"
+            try:
+                self.proc = subprocess.Popen(
+                    ["powershell", "-NoProfile", "-Command", script],
+                    creationflags=self._win_createflags,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                ); return
+            except Exception:
+                self.proc = None
+        # simpleaudio (WAV only)
+        if self._sa and self.path.lower().endswith(".wav"):
+            try:
+                wave_obj = self._sa.WaveObject.from_wave_file(self.path)
+                self.play_obj = wave_obj.play()
+                return
+            except Exception:
+                self.play_obj = None
+
+    def play_once(self):
+        self.stop()
+        self._spawn_once()
+
+    def start_loop(self):
+        # winsound loop (Windows, WAV) is perfect
+        if self._winsound and self.path and self.path.lower().endswith(".wav"):
+            try:
+                self._winsound.PlaySound(self.path, self._winsound.SND_FILENAME | self._winsound.SND_ASYNC | self._winsound.SND_LOOP)
+                return
+            except Exception:
+                pass
+        # ffplay native loop
+        if self._ffplay:
+            try:
+                self._loop_stop.clear()
+                self.proc = subprocess.Popen(
+                    [self._ffplay, "-nodisp", "-loglevel", "quiet", "-autoexit", "-stream_loop", "-1", self.path],
+                    preexec_fn=(os.setsid if not self._is_win else None),
+                    creationflags=(self._win_createflags if self._is_win else 0),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                def _watch():
+                    while not self._loop_stop.is_set(): time.sleep(0.1)
+                    self._stop_proc()
+                self.loop_thread = threading.Thread(target=_watch, daemon=True); self.loop_thread.start()
+                return
+            except Exception:
+                self.proc = None
+        # Fallback loop: respawn when finished
+        self._loop_stop.clear()
+        def _loop():
+            while not self._loop_stop.is_set():
+                self._spawn_once()
+                while not self._loop_stop.is_set():
+                    alive = False
+                    if self.proc and self.proc.poll() is None: alive = True
+                    if self.play_obj and self.play_obj.is_playing(): alive = True
+                    if not alive: break
+                    time.sleep(0.1)
+            self._stop_proc()
+        self.loop_thread = threading.Thread(target=_loop, daemon=True); self.loop_thread.start()
+
 # ---------- Drawing helpers ----------
 def _draw_lines_zones(frame, lines_cfg, zones_cfg, frame_color, frame_thickness):
     th = int(frame_thickness if frame_thickness is not None else 2)
@@ -238,14 +425,16 @@ def _process_frame_counting(app, frame_idx, fps, names,
                             det_boxes, det_confs, det_cids, det_ids,
                             last_anchor, line_states, line_counts, zone_states, zone_counts, events,
                             line_min_gap, zone_min_gap, anchor_mode, ghost_margin,
-                            alert_enabled, alert_classes_set, alert_freq, alert_dur,
-                            alert_state, alert_freeze_ms,
-                            alert_when_inside,
-                            event_time_sec, timecode_str, clock_str):
+                            alert_enabled, selected_class_ids_set,
+                            alert_freeze_ms, alert_when_inside,
+                            event_time_sec, timecode_str, clock_str,
+                            sound_player: SoundPlayer | None, alert_loop: bool):
     anchors = [_anchor_from_box(b, anchor_mode, ghost_margin) for b in det_boxes]
+    now_ms = int(time.time()*1000)
+    frame_active_ids = set()  # IDs that should keep loop playing in this frame
 
     for (tid, b, s, cid, (cx,cy)) in zip(det_ids, det_boxes, det_confs, det_cids, anchors):
-        # Lines: single beep on crossing
+        # Lines: one-shot sound on crossing
         for li, ln in enumerate(lines_cfg or []):
             a = (ln["a"][0], ln["a"][1]); b2 = (ln["b"][0], ln["b"][1])
             st = line_states[li].get(tid, {"last_side": None, "last_frame": -9999})
@@ -275,14 +464,16 @@ def _process_frame_counting(app, frame_idx, fps, names,
                     "counter_name": ln["name"],
                     "conf": float(s)
                 })
-                if alert_enabled:
-                    cname = (names[cid] if isinstance(names, dict) else names[cid]).lower()
-                    if (not alert_classes_set) or (cname in alert_classes_set):
-                        _beep(alert_freq, alert_dur)
+                if alert_enabled and (cid in selected_class_ids_set) and sound_player:
+                    if now_ms - app._alert_state.get("last_ms", 0) >= int(alert_freeze_ms):
+                        sound_player.play_once()
+                        app._alert_state["last_ms"] = now_ms
+                        try: app._log(f"[ALERT] ping (line {direction}) {names[cid]} at {timecode_str}")
+                        except Exception: pass
             else:
                 line_states[li][tid] = st
 
-        # Zones: continuous beep according to mode (inside/outside)
+        # Zones: active while inside/outside (depending on mode)
         for zi, zn in enumerate(zones_cfg or []):
             sstate = zone_states[zi].get(tid, {"inside": False, "last_change": -9999})
             inside_now = point_in_polygon((cx,cy), zn["pts"])
@@ -309,19 +500,39 @@ def _process_frame_counting(app, frame_idx, fps, names,
             else:
                 zone_states[zi][tid] = sstate
 
-            # Continuous beep per mode
-            if alert_enabled:
-                want_inside = bool(alert_when_inside)  # 1=inside, 0=outside
+            # Sound condition per object → aggregate in frame_active_ids
+            if alert_enabled and (cid in selected_class_ids_set):
+                want_inside = bool(alert_when_inside)
                 cond = (sstate.get("inside", False) is True) if want_inside else (sstate.get("inside", False) is False)
                 if cond:
-                    cname = (names[cid] if isinstance(names, dict) else names[cid]).lower()
-                    if (not alert_classes_set) or (cname in alert_classes_set):
-                        now_ms = int(time.time()*1000)
-                        if now_ms - alert_state.get("last_ms", 0) >= int(alert_freeze_ms):
-                            _beep(alert_freq, alert_dur)
-                            alert_state["last_ms"] = now_ms
+                    frame_active_ids.add(tid)
 
         last_anchor[tid] = (cx,cy)
+
+    # Frame-level sound handling (immediate start/stop)
+    if alert_enabled and sound_player:
+        if alert_loop:
+            if frame_active_ids:
+                if not app._alert_state.get("looping", False):
+                    if now_ms - app._alert_state.get("last_ms", 0) >= int(alert_freeze_ms):
+                        sound_player.start_loop()
+                        app._alert_state["last_ms"] = now_ms
+                        app._alert_state["looping"] = True
+                        try: app._log("[ALERT] loop start")
+                        except Exception: pass
+            else:
+                if app._alert_state.get("looping", False):
+                    sound_player.stop()
+                    app._alert_state["looping"] = False
+                    try: app._log("[ALERT] loop stop")
+                    except Exception: pass
+        else:
+            # one-shot pings while condition holds, freeze-limited
+            if frame_active_ids and now_ms - app._alert_state.get("last_ms", 0) >= int(alert_freeze_ms):
+                sound_player.play_once()
+                app._alert_state["last_ms"] = now_ms
+                try: app._log("[ALERT] ping")
+                except Exception: pass
 
     return anchors
 
@@ -347,7 +558,9 @@ def run(app, sources, outp: Path, selected_idx):
 
         names = app.model.names
         id2name = names if isinstance(names, dict) else {i:nm for i,nm in enumerate(names)}
-        select_names = [id2name[i] for i in selected_idx]
+        # Selected class IDs from main window drive alert filtering
+        selected_class_ids_set = set(int(i) for i in selected_idx)
+
         anchor_mode = getattr(app, "anchor_mode", None).get() if hasattr(app, "anchor_mode") else "bottom"
         overlay_mode = getattr(app, "overlay_mode", None).get() if hasattr(app, "overlay_mode") else "centroid"
         ghost_margin = int(getattr(app, "ghost_margin", None).get() if hasattr(app, "ghost_margin") else 0)
@@ -361,21 +574,42 @@ def run(app, sources, outp: Path, selected_idx):
         frame_color = _parse_color(p.get("overlay_frame_color", None))
         frame_thickness = int(p.get("overlay_frame_thickness", 2)) if str(p.get("overlay_frame_thickness","")).strip() != "" else 2
 
-        # ALERTS
-        alert_enabled = getattr(app, "alert_enabled", None).get() if hasattr(app, "alert_enabled") else False
-        raw_classes = (getattr(app, "alert_classes", None).get() if hasattr(app, "alert_classes") else "person")
-        alert_classes_set = set([c.strip().lower() for c in raw_classes.split(",") if c.strip()])
-        alert_freq = int(getattr(app, "alert_freq", None).get() if hasattr(app, "alert_freq") else 880)
-        alert_dur  = int(getattr(app, "alert_dur", None).get() if hasattr(app, "alert_dur") else 180)
-        alert_freeze_ms = int(getattr(app, "alert_freeze", None).get() if hasattr(app, "alert_freeze") else 1500)
+        # ALERTS — read from UI vars first (works even if user didn't hit Apply)
+        alert_enabled = bool(getattr(app, "alert_enabled", None).get()) if hasattr(app, "alert_enabled") else bool(p.get("alert_enabled", False))
+        alert_sound_path = ""
+        if hasattr(app, "alert_sound"):
+            try: alert_sound_path = str(app.alert_sound.get()).strip()
+            except Exception: alert_sound_path = ""
+        if not alert_sound_path:
+            alert_sound_path = str(p.get("alert_sound", "")).strip()
+        alert_loop = bool(getattr(app, "alert_loop", None).get()) if hasattr(app, "alert_loop") else bool(p.get("alert_loop", True))
+        if hasattr(app, "alert_freeze_s"):
+            try:
+                alert_freeze_ms = 1000 * int(app.alert_freeze_s.get())
+            except Exception:
+                alert_freeze_ms = 1000 * int(p.get("alert_freeze_s", 2))
+        else:
+            alert_freeze_ms = 1000 * int(p.get("alert_freeze_s", 2))
         alert_when_inside = int(p.get("alert_zone_inside", 1))  # 1=in zone, 0=outside
+
+        sound_player = SoundPlayer(alert_sound_path if alert_sound_path else None)
 
         app._log(f"Param: imgsz={imgsz}, conf={conf}, iou={iou}, frame_skip={frame_skip}, "
                  f"track_buffer={track_buffer}, match={match_thresh}, hits={min_hits}, device={device}")
         tracker_kind = (getattr(app, "tracker_kind", None).get() if hasattr(app, "tracker_kind") else "bytetrack")
         tracker_name, _tracker_obj_preview = _make_tracker(tracker_kind, conf, track_buffer, match_thresh, min_hits)
-        app._log(f"Tracker: {tracker_name} | Classes: {', '.join(select_names)} | "
-                 f"Alert={'ON' if alert_enabled else 'OFF'} ({', '.join(sorted(alert_classes_set)) or '*'}, freeze={alert_freeze_ms}ms, zone_mode={'INSIDE' if alert_when_inside else 'OUTSIDE'})")
+        app._log(
+            "Tracker: {tn} | Selected classes: {cls} | Alert={onoff} {mode} {snd}; freeze={fz:.1f}s; zone_mode={zmode} | Sound backends: {bk}".format(
+                tn=tracker_name,
+                cls=", ".join(id2name[i] for i in sorted(selected_class_ids_set)) if selected_class_ids_set else "(none)",
+                onoff=("ON" if alert_enabled else "OFF"),
+                mode="(loop)" if alert_loop else "(ping)",
+                snd=f"(file: {Path(alert_sound_path).name})" if alert_sound_path else "(no file)",
+                fz=alert_freeze_ms/1000.0,
+                zmode=("INSIDE" if alert_when_inside else "OUTSIDE"),
+                bk=sound_player.describe_backends() if sound_player else "none"
+            )
+        )
 
         for vi, source in enumerate(sources):
             src_name = (str(source) if not isinstance(source, (int,)) else f"cam_{source}")
@@ -392,7 +626,6 @@ def run(app, sources, outp: Path, selected_idx):
             W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
             H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
 
-            # start timecode/clock bases
             start_perf = time.perf_counter()
             start_epoch = time.time()
 
@@ -434,26 +667,21 @@ def run(app, sources, outp: Path, selected_idx):
             zone_states = [{ } for _ in zones_cfg]
             zone_counts = [{"in":0,"out":0} for _ in zones_cfg]
             events = []
-            alert_state = {"last_ms": 0}
-            trails = {} if trace_on else None  # tid -> deque[(x,y)]
+            trails = {} if (getattr(app, "trace_enabled", None).get() if hasattr(app, "trace_enabled") else True) else None
+
+            # per-run alert state (for freeze + loop)
+            app._alert_state = {"last_ms": 0, "looping": False}
 
             def _frame_timing(is_stream_local: bool) -> tuple[float, str, str]:
-                """
-                Returns: (time_sec, timecode_str, clock_str)
-                - LIVE: sec = elapsed(perf), timecode=mm:ss, clock=YYYY-mm-dd HH:MM:SS
-                - FILE: sec = CAP_PROP_POS_MSEC/1000 (fallback: frame_idx/fps), timecode=mm:ss, clock=""
-                """
                 if is_stream_local:
                     sec = time.perf_counter() - start_perf
                     tc = _fmt_timecode(sec)
                     clk = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_epoch + sec))
                     return sec, tc, clk
-                # offline
                 pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
                 if pos_ms and pos_ms > 0:
                     sec = float(pos_ms) / 1000.0
                 else:
-                    # fallback: if skipping frames, compute from frame index
                     cur_idx = cap.get(cv2.CAP_PROP_POS_FRAMES)
                     if cur_idx and cur_idx > 0 and fps > 0:
                         sec = float(cur_idx) / float(fps)
@@ -463,9 +691,8 @@ def run(app, sources, outp: Path, selected_idx):
                 return sec, tc, ""
 
             def _handle_frame(frame, frame_idx):
-                # Inference
                 res = app.model(frame, imgsz=imgsz, conf=conf, iou=iou,
-                                device=device, classes=selected_idx, verbose=False)[0]
+                                device=device, classes=list(sorted(selected_class_ids_set)), verbose=False)[0]
 
                 det_boxes, det_confs, det_cids, det_ids = [], [], [], []
                 if res.boxes is not None and len(res.boxes) > 0:
@@ -490,34 +717,30 @@ def run(app, sources, outp: Path, selected_idx):
                         det_cids  = cls.astype(int).tolist()
                         det_ids   = list(range(1, len(det_boxes)+1))
 
-                # Timing for events (once per frame)
                 sec, tc, clk = _frame_timing(is_stream)
 
-                # Counting + alerts
                 anchors = _process_frame_counting(
                     app, frame_idx, fps, id2name,
                     lines_cfg, zones_cfg,
                     det_boxes, det_confs, det_cids, det_ids,
                     last_anchor, line_states, line_counts, zone_states, zone_counts, events,
                     line_min_gap, zone_min_gap, anchor_mode, ghost_margin,
-                    alert_enabled, alert_classes_set, alert_freq, alert_dur,
-                    alert_state, alert_freeze_ms,
-                    alert_when_inside,
-                    sec, tc, clk
+                    alert_enabled, selected_class_ids_set,
+                    alert_freeze_ms, alert_when_inside,
+                    sec, tc, clk,
+                    sound_player if alert_enabled and sound_player and sound_player.path else None,
+                    alert_loop
                 )
 
-                # Trails
                 if trails is not None:
                     for tid, a in zip(det_ids, anchors):
                         dq = trails.get(tid)
                         if dq is None:
-                            dq = deque(maxlen=max(2, int(trace_len)))
+                            dq = deque(maxlen=max(2, int((getattr(app, "trace_len", None).get() if hasattr(app, "trace_len") else 24))))
                             trails[tid] = dq
                         dq.append((int(a[0]), int(a[1])))
 
                 overlay = frame
-
-                # Detections
                 try:
                     draw_detections(overlay, det_boxes, det_confs, det_cids, det_ids,
                                     id2name, (overlay_mode or "centroid"),
@@ -525,7 +748,11 @@ def run(app, sources, outp: Path, selected_idx):
                 except Exception:
                     pass
 
-                # Lines/zones frames + trails + counter labels
+                frame_color = _parse_color(p.get("overlay_frame_color", None))
+                frame_thickness = int(p.get("overlay_frame_thickness", 2)) if str(p.get("overlay_frame_thickness","")).strip() != "" else 2
+                trace_color = _parse_color(p.get("trace_color", None))
+                trace_thickness = int(p.get("trace_thickness", 2)) if str(p.get("trace_thickness","")).strip() != "" else 2
+
                 _draw_lines_zones(overlay, lines_cfg, zones_cfg, frame_color, frame_thickness)
                 _draw_trails(overlay, trails, trace_color, trace_thickness)
                 _draw_counts_labels(overlay, lines_cfg, line_counts, zones_cfg, zone_counts)
@@ -533,7 +760,6 @@ def run(app, sources, outp: Path, selected_idx):
                 return overlay
 
             processed = 0
-            # first_frame (offline)
             if not is_stream and 'first_frame' in locals() and first_frame is not None:
                 if (processed % stride) == 0:
                     ov = _handle_frame(first_frame, processed)
@@ -558,6 +784,13 @@ def run(app, sources, outp: Path, selected_idx):
                 _preview(app, ov, processed, fps, total_frames)
                 processed += 1
 
+            # stop any leftover looping sound when source finishes
+            try:
+                if sound_player:
+                    sound_player.stop()
+            except Exception:
+                pass
+
             cap.release()
             writer.release()
 
@@ -574,10 +807,13 @@ def run(app, sources, outp: Path, selected_idx):
                 "zones": [{"name": zn["name"], **zone_counts[i]} for i,zn in enumerate(zones_cfg)],
                 "advanced": {
                     "trace_color": p.get("trace_color", None),
-                    "trace_thickness": trace_thickness,
+                    "trace_thickness": int(p.get("trace_thickness", 2)),
                     "overlay_frame_color": p.get("overlay_frame_color", None),
-                    "overlay_frame_thickness": frame_thickness,
-                    "alert_zone_inside": alert_when_inside
+                    "overlay_frame_thickness": int(p.get("overlay_frame_thickness", 2)),
+                    "alert_zone_inside": int(p.get("alert_zone_inside", 1)),
+                    "alert_sound": alert_sound_path,
+                    "alert_loop": alert_loop,
+                    "alert_freeze_s": int(alert_freeze_ms/1000)
                 }
             }
             sum_path = save_json_collision(summary, summ_dir / f"{base_stem}_summary.json")
