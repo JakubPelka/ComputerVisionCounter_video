@@ -1,4 +1,4 @@
-# cv_video.py — kompaktowy UI + dynamiczna siatka klas (do 12 kolumn) + presety (preview/trace/anchor/ghost/alert)
+# cv_video.py — compact UI + dynamic class grid (up to 12 columns) + presets (preview/trace/anchor/ghost/alert)
 from __future__ import annotations
 import threading, sys, json
 from pathlib import Path
@@ -21,23 +21,113 @@ from ultralytics import YOLO
 try:
     from ultralytics.nn.modules import block as _ublock
     if not hasattr(_ublock, "C3k2"):
-        raise RuntimeError("Ultralytics bez wsparcia YOLOv11 (brak C3k2).")
+        raise RuntimeError("Ultralytics without YOLOv11 support (missing C3k2).")
 except Exception as e:
     print("Ultralytics check:", e, file=sys.stderr)
 
 
+# -------------------- Context help (shown in the right panel) --------------------
+ADV_HELP_INTRO = (
+    "Click or hover any field to see a short explanation and tips.\n\n"
+    "Quick tips:\n"
+    "• Missing objects → lower conf a bit, raise imgsz, or reduce frame_skip.\n"
+    "• Too many false detections → raise conf.\n"
+    "• Two boxes on one object → raise iou slightly.\n"
+    "• Nearby objects glued into one → lower iou slightly.\n"
+    "• IDs drop after occlusion → raise track_buffer or lower match_thresh a little.\n"
+    "• ID sticks after object is gone → lower track_buffer or raise match_thresh.\n"
+    "• Double counts on a line → raise line_min_gap_frames or line_min_sep_px.\n"
+    "• Zone IN/OUT flicker → raise zone_min_gap_frames.\n"
+    "• Line at the bottom edge → Anchor=bottom and increase Ghost margin."
+)
+
+ADV_HELP_BY_KEY = {
+    # Detection / tracking / hysteresis
+    "imgsz": ("imgsz",
+              "Size of the image sent to the AI.\n"
+              "Bigger = sharper detections but slower.\n"
+              "Tip: 320–640 for CPU; 960–1280 only for small/far objects."),
+    "conf": ("conf",
+             "Confidence filter. Higher = stricter (fewer false alarms, more misses).\n"
+             "Start 0.50–0.60. Misses? lower a bit. Too many fakes? raise."),
+    "iou": ("iou",
+            "Box overlap used to remove duplicates. Higher merges more; lower keeps more boxes.\n"
+            "Two boxes on one object → raise a little. Close objects merge → lower a little."),
+    "frame_skip": ("frame_skip",
+                   "How many frames to skip between analyses. 0 = every frame (best quality, slowest).\n"
+                   "+1 or +2 speeds up but can miss fast motion."),
+    "track_buffer": ("track_buffer",
+                     "How long (in frames) a lost object ID is kept alive.\n"
+                     "Higher survives short occlusions; too high may leave ghost IDs."),
+    "match_thresh": ("match_thresh",
+                     "How strict matching is when assigning boxes to existing IDs.\n"
+                     "Higher = stricter (fewer wrong matches, more ID resets)."),
+    "min_hits": ("min_hits",
+                 "Frames needed before a new track is confirmed.\n"
+                 "Short flickers? raise. Delayed ID appearance? lower."),
+    "line_min_gap_frames": ("line_min_gap_frames",
+                            "Minimum frames between two line counts for the same object (anti-bounce)."),
+    "line_min_sep_px": ("line_min_sep_px",
+                        "Minimum movement across the line (pixels) to count again.\n"
+                        "Sliding along the line double-counts? raise this."),
+    "zone_min_gap_frames": ("zone_min_gap_frames",
+                            "Minimum frames between zone IN/OUT events for the same object.\n"
+                            "IN/OUT toggling on the border? raise this."),
+
+    # Overlay / Trace / Anchor / Ghost
+    "preview_enabled": ("Enable LIVE preview",
+                        "Shows processed video while running. Turn off to save CPU."),
+    "trace_enabled": ("Trace",
+                      "Draw a tail behind each object."),
+    "trace_len": ("Trace len",
+                  "How many recent points to keep for the tail."),
+    "anchor_mode": ("Anchor",
+                    "Point used for counting & trails.\n"
+                    "bottom → feet/wheels on the ground (best for floor lines)\n"
+                    "center → center of box."),
+    "ghost_margin": ("Ghost margin (px)",
+                     "Only for 'bottom' anchor: lift the point above the box edge.\n"
+                     "Useful if the bottom edge touches the frame border or bounces on a line."),
+
+    # Colors / thickness
+    "trace_color": ("Trace color",
+                    "Use 'auto', a #RRGGBB color (e.g. #00FF88), or B,G,R (e.g. 255,200,0)."),
+    "trace_thickness": ("Trace thickness",
+                        "Line width in pixels (0–16). 0 hides traces."),
+    "overlay_frame_color": ("Frame color",
+                            "Color for lines & zone outlines. Same format as Trace color."),
+    "overlay_frame_thickness": ("Frame thickness",
+                                "Line width in pixels (0–16). 0 hides frame lines."),
+
+    # Sound alert
+    "alert_enabled": ("Enable alert",
+                      "Turn zone beeps on/off."),
+    "alert_classes": ("Classes (CSV)",
+                      "Which classes trigger sound. Comma-separated names.\n"
+                      "Empty = any class."),
+    "alert_freq": ("Hz",
+                   "Beep pitch (frequency). Higher = higher pitch."),
+    "alert_dur": ("ms",
+                  "Beep length (milliseconds)."),
+    "alert_freeze": ("freeze (ms)",
+                     "Cool-down between beeps so it doesn't beep constantly."),
+    "alert_zone_inside": ("Mode",
+                          "Choose when to beep: inside the zone or outside the zone."),
+}
+
+
 class App(AppUIMixin, tk.Tk):
-    # --- konfiguracja siatki klas ---
+    # --- class grid configuration ---
     CLASS_COL_MIN = 2
     CLASS_COL_MAX = 12
-    CLASS_CELL_PX = 160  # docelowa szerokość jednej kolumny (orientacyjnie)
+    CLASS_CELL_PX = 160  # target width of a single column (approx.)
 
     def __init__(self):
         super().__init__()
-        self.title("Unidrone VIDEO – liczenie przekroczeń linii/stref (YOLO + ByteTrack)")
+        self.title("ComputerVisionCounter VIDEO – line/zone counting (YOLO + ByteTrack)")
         self.geometry("980x720")
 
-        # --- zmienne GUI ---
+        # --- GUI variables ---
         self.input_dir = tk.StringVar()
         self.output_dir = tk.StringVar()
         models_default = Path(__file__).parent / MODEL_DIRNAME
@@ -49,9 +139,9 @@ class App(AppUIMixin, tk.Tk):
 
         self.model = None; self.names = None; self.class_vars = []
         self.selected_files = []
-        self._class_cols = 5   # aktualizowane dynamicznie
+        self._class_cols = 5   # updated dynamically
 
-        # --- zaawansowane / presetable ---
+        # --- advanced / preset-able ---
         self.advanced_override = False
         self.adv_params = {
             "imgsz": VIDEO_PRESETS[DEFAULT_QUALITY]["imgsz"],
@@ -64,7 +154,7 @@ class App(AppUIMixin, tk.Tk):
             "line_min_gap": LINE_MIN_GAP_FRAMES_DEFAULT,
             "line_min_sep": LINE_MIN_SEP_PX_DEFAULT,
             "zone_min_gap": ZONE_MIN_GAP_FRAMES_DEFAULT,
-            # extra (w presetach)
+            # extras (in presets)
             "preview_enabled": True,
             "trace_enabled": True,
             "trace_len": 24,
@@ -77,7 +167,7 @@ class App(AppUIMixin, tk.Tk):
             "alert_freeze": 1500,
         }
 
-        # powiązania (używane przez run)
+        # bindings (used by run)
         self.preview_enabled = tk.BooleanVar(value=self.adv_params["preview_enabled"])
         self.trace_enabled   = tk.BooleanVar(value=self.adv_params["trace_enabled"])
         self.trace_len       = tk.IntVar(value=self.adv_params["trace_len"])
@@ -91,7 +181,7 @@ class App(AppUIMixin, tk.Tk):
 
         # --- progress/worker + preview window ---
         self.progress_var = tk.DoubleVar(value=0.0)
-        self.progress_label = tk.StringVar(value="Gotowe.")
+        self.progress_label = tk.StringVar(value="Ready.")
         self.abort_event = threading.Event()
         self.worker_done = threading.Event()
         self.worker_thread = None
@@ -101,42 +191,42 @@ class App(AppUIMixin, tk.Tk):
         self._preview_lbl = None
         self._preview_imgtk = None
 
-        # --- budowa UI ---
+        # --- build UI ---
         self.build_ui_compact()
         self._autoload_best_model()
 
-    # ========== UI (kompaktowa wersja) ==========
+    # ========== UI (compact version) ==========
     def build_ui_compact(self):
         root = tk.Frame(self); root.pack(fill="both", expand=True, padx=8, pady=6)
 
-        # Sekcja: ścieżki
-        self._row_browse(root, "Folder z wideo (wejście):", self.input_dir, self.browse_input, is_dir=True)
+        # Section: paths
+        self._row_browse(root, "Video folder (input):", self.input_dir, self.browse_input, is_dir=True)
         f_files = tk.Frame(root); f_files.pack(fill="x", pady=2)
-        tk.Button(f_files, text="Wybierz pliki wideo...", command=self.browse_files).pack(side="left")
-        self.files_label = tk.Label(f_files, text="— brak —"); self.files_label.pack(side="left", padx=8)
-        tk.Button(f_files, text="Wyczyść wybór", command=self.clear_files).pack(side="left", padx=(8,0))
+        tk.Button(f_files, text="Select video files…", command=self.browse_files).pack(side="left")
+        self.files_label = tk.Label(f_files, text="— none —"); self.files_label.pack(side="left", padx=8)
+        tk.Button(f_files, text="Clear selection", command=self.clear_files).pack(side="left", padx=(8,0))
 
-        self._row_browse(root, "Folder wynikowy (opcjonalnie):", self.output_dir, self.browse_output, is_dir=True)
-        self._row_browse(root, "Wagi (.pt/.zip):", self.weights_path, self.browse_weights, is_dir=False)
+        self._row_browse(root, "Output folder (optional):", self.output_dir, self.browse_output, is_dir=True)
+        self._row_browse(root, "Weights (.pt/.zip):", self.weights_path, self.browse_weights, is_dir=False)
 
-        # Źródło (kompakt)
-        srcf = tk.LabelFrame(root, text="Źródło wejściowe"); srcf.pack(fill="x", pady=4)
+        # Source (compact)
+        srcf = tk.LabelFrame(root, text="Input source"); srcf.pack(fill="x", pady=4)
         self.src_mode = tk.StringVar(value="files"); self.cam_index = tk.StringVar(value="0"); self.url_input = tk.StringVar(value="")
         def _src_toggle(*_):
             mf = self.src_mode.get()
             cam_ent.config(state=("normal" if mf=="camera" else "disabled"))
             url_ent.config(state=("normal" if mf=="url" else "disabled"))
-        tk.Radiobutton(srcf, text="Pliki",  variable=self.src_mode, value="files", command=_src_toggle).pack(side="left", padx=6)
-        tk.Radiobutton(srcf, text="Kamera", variable=self.src_mode, value="camera", command=_src_toggle).pack(side="left", padx=6)
+        tk.Radiobutton(srcf, text="Files",  variable=self.src_mode, value="files", command=_src_toggle).pack(side="left", padx=6)
+        tk.Radiobutton(srcf, text="Camera", variable=self.src_mode, value="camera", command=_src_toggle).pack(side="left", padx=6)
         tk.Label(srcf, text="Index:").pack(side="left")
         cam_ent = tk.Entry(srcf, width=4, textvariable=self.cam_index); cam_ent.pack(side="left", padx=(0,8))
         tk.Radiobutton(srcf, text="RTSP/HTTP URL", variable=self.src_mode, value="url", command=_src_toggle).pack(side="left", padx=6)
         url_ent = tk.Entry(srcf, textvariable=self.url_input); url_ent.pack(side="left", fill="x", expand=True, padx=(0,6))
         _src_toggle()
 
-        # Jakość (suwak) + opis
+        # Quality (slider) + label
         qf = tk.Frame(root); qf.pack(fill="x", pady=4)
-        tk.Label(qf, text="Jakość (=1 szybciej/słabiej, 5 = ULTRA)").pack(side="left")
+        tk.Label(qf, text="Quality (1 = faster/lower, 5 = ULTRA)").pack(side="left")
         tk.Scale(qf, from_=1, to=5, orient="horizontal", variable=self.quality,
                  command=lambda *_: self._update_preset_label()).pack(side="left", fill="x", expand=True, padx=8)
         self.preset_label = tk.Label(qf, text=""); self.preset_label.pack(side="left")
@@ -144,27 +234,26 @@ class App(AppUIMixin, tk.Tk):
 
         # Overlay + Tracker
         ot = tk.Frame(root); ot.pack(fill="x", pady=4)
-        ov = tk.LabelFrame(ot, text="Wizualizacja (overlay)"); ov.pack(side="left", fill="x", expand=True, padx=(0,6))
-        tk.Radiobutton(ov, text="Centroidy", variable=self.overlay_mode, value="centroid").pack(side="left", padx=6)
-        tk.Radiobutton(ov, text="Boksy", variable=self.overlay_mode, value="boxes").pack(side="left", padx=6)
-        tk.Radiobutton(ov, text="Boksy + conf", variable=self.overlay_mode, value="boxes_conf").pack(side="left", padx=6)
-        tk.Radiobutton(ov, text="Polygony", variable=self.overlay_mode, value="polygon").pack(side="left", padx=6)
+        ov = tk.LabelFrame(ot, text="Overlay"); ov.pack(side="left", fill="x", expand=True, padx=(0,6))
+        tk.Radiobutton(ov, text="Centroids", variable=self.overlay_mode, value="centroid").pack(side="left", padx=6)
+        tk.Radiobutton(ov, text="Boxes", variable=self.overlay_mode, value="boxes").pack(side="left", padx=6)
+        tk.Radiobutton(ov, text="Boxes + conf", variable=self.overlay_mode, value="boxes_conf").pack(side="left", padx=6)
+        tk.Radiobutton(ov, text="Polygons", variable=self.overlay_mode, value="polygon").pack(side="left", padx=6)
 
         tr = tk.LabelFrame(ot, text="Tracker"); tr.pack(side="left", padx=(6,0))
         tk.Radiobutton(tr, text="ByteTrack", variable=self.tracker_kind, value="bytetrack").pack(side="left", padx=6)
         tk.Radiobutton(tr, text="BoT-SORT", variable=self.tracker_kind, value="botsort").pack(side="left", padx=6)
 
-        # Wybór klas — scrollowalny i kompaktowy + DYNAMICZNE KOLUMNY
-        lf = tk.LabelFrame(root, text="Wybór klas (po wczytaniu wag)"); lf.pack(fill="both", expand=True, pady=4)
+        # Class selection — scrollable & compact + DYNAMIC COLUMNS
+        lf = tk.LabelFrame(root, text="Class selection (after loading weights)"); lf.pack(fill="both", expand=True, pady=4)
         self.classes_scroll = ScrollableFrame(lf, height=220)
         self.classes_scroll.pack(fill="both", expand=True)
-        # reaguj na realny resize canvasa
         self.classes_scroll.canvas.bind("<Configure>", self._on_classes_canvas_config)
 
-        # Sterowanie + Postęp
+        # Controls + Progress
         bf = tk.Frame(root); bf.pack(fill="x", pady=6)
         self.btn_start = tk.Button(bf, text="START", command=self.start); self.btn_start.pack(side="left")
-        tk.Button(bf, text="Opcje zaawansowane…", command=self.open_advanced).pack(side="left", padx=8)
+        tk.Button(bf, text="Advanced options…", command=self.open_advanced).pack(side="left", padx=8)
         self.btn_abort = tk.Button(bf, text="ABORT", command=self.abort, state="disabled"); self.btn_abort.pack(side="left", padx=(8,0))
 
         pf = tk.Frame(root); pf.pack(fill="x", pady=(0,4))
@@ -177,12 +266,12 @@ class App(AppUIMixin, tk.Tk):
         logf = tk.Frame(root); logf.pack(fill="both", expand=True)
         self.log = tk.Text(logf, height=8, state="normal"); self.log.pack(fill="both", expand=True)
 
-    # ========== pomocnicze (UI) ==========
+    # ========== helpers (UI) ==========
     def _row_browse(self, parent, label, var, cmd, is_dir=True):
         f = tk.Frame(parent); f.pack(fill="x", pady=3)
         tk.Label(f, text=label, width=26, anchor="w").pack(side="left")
         tk.Entry(f, textvariable=var).pack(side="left", fill="x", expand=True, padx=6)
-        tk.Button(f, text="Wybierz…", command=cmd).pack(side="left")
+        tk.Button(f, text="Browse…", command=cmd).pack(side="left")
 
     def _update_preset_label(self):
         p = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
@@ -190,30 +279,30 @@ class App(AppUIMixin, tk.Tk):
                                        f"skip={p['frame_skip']}  buf={p['track_buffer']}  "
                                        f"match={p['match_thresh']}  hits={p['min_hits']}"))
 
-    # ========== logika wczytywania modelu ==========
+    # ========== model loading logic ==========
     def browse_input(self):
-        d = filedialog.askdirectory(title="Wybierz folder z wideo")
+        d = filedialog.askdirectory(title="Choose input video folder")
         if d: self.input_dir.set(d)
 
     def browse_files(self):
-        files = filedialog.askopenfilenames(title="Wybierz pliki wideo",
-                                            filetypes=[("Wideo","*.mp4 *.mov *.avi *.mkv *.m4v *.wmv *.mpg *.mpeg *.ts")])
+        files = filedialog.askopenfilenames(title="Select video files",
+                                            filetypes=[("Video","*.mp4 *.mov *.avi *.mkv *.m4v *.wmv *.mpg *.mpeg *.ts")])
         if files:
-            self.selected_files = list(files); self.files_label.config(text=f"Wybrano {len(self.selected_files)} plików")
+            self.selected_files = list(files); self.files_label.config(text=f"Selected {len(self.selected_files)} files")
         else:
-            self.selected_files = []; self.files_label.config(text="— brak —")
+            self.selected_files = []; self.files_label.config(text="— none —")
 
     def clear_files(self):
-        self.selected_files = []; self.files_label.config(text="— brak —")
+        self.selected_files = []; self.files_label.config(text="— none —")
 
     def browse_output(self):
-        d = filedialog.askdirectory(title="Wybierz folder wynikowy")
+        d = filedialog.askdirectory(title="Choose output folder")
         if d: self.output_dir.set(d)
 
     def browse_weights(self):
         initdir = str(Path(self.weights_path.get()).parent) if self.weights_path.get() else str(Path(__file__).parent / MODEL_DIRNAME)
-        f = filedialog.askopenfilename(initialdir=initdir, title="Wybierz wagi",
-                                       filetypes=[("Wagi",".pt .zip"), ("Wszystkie","*.*")])
+        f = filedialog.askopenfilename(initialdir=initdir, title="Choose weights",
+                                       filetypes=[("Weights",".pt .zip"), ("All","*.*")])
         if f:
             self.weights_path.set(f); self.load_model_and_classes()
 
@@ -235,27 +324,26 @@ class App(AppUIMixin, tk.Tk):
             wp = Path(self.weights_path.get().strip())
             if wp.is_dir():
                 best = find_best_weights(wp)
-                if not best: raise FileNotFoundError(f"W {wp} brak .pt/.zip")
+                if not best: raise FileNotFoundError(f"No .pt/.zip in {wp}")
                 wp = best
 
             pt = resolve_weights_to_pt(wp, extract_dir)
-            self._log(f"Wczytuję model: {pt}")
+            self._log(f"Loading model: {pt}")
             self.model = YOLO(str(pt)); self.names = self.model.names
-            self._populate_classes(self.names)  # wstępne rysowanie siatki
-            self._log("Wagi i lista klas wczytane.")
+            self._populate_classes(self.names)  # initial grid draw
+            self._log("Weights and class list loaded.")
         except Exception as e:
-            messagebox.showerror("Model", f"Nie można wczytać wag:\n{e}")
+            messagebox.showerror("Model", f"Cannot load weights:\n{e}")
 
-    # ========== klasy (dynamiczna siatka) ==========
+    # ========== classes (dynamic grid) ==========
     def _populate_classes(self, names):
         """
-        Rysuje siatkę checkboxów. Każda kolumna ma równą szerokość policzoną
-        z aktualnie dostępnej szerokości canvasa — dzięki temu layout zapełnia
-        równo cały obszar (bez „urwanej” ostatniej kolumny).
+        Draw a grid of checkboxes. Each column gets equal width computed
+        from the current canvas width — the layout fills the whole area
+        evenly (no “cut” last column).
         """
         container = self.classes_scroll.inner
 
-        # zapamiętaj zaznaczenia, żeby przerysowanie nie kasowało wyboru
         previously_selected = set(idx for (_nm, var, idx) in getattr(self, "class_vars", []) if var.get())
         for w in container.winfo_children():
             w.destroy()
@@ -263,32 +351,26 @@ class App(AppUIMixin, tk.Tk):
 
         id2name = list(names.values()) if isinstance(names, dict) else list(names)
 
-        # szerokość dostępnego obszaru (realna szerokość canvasa ScrollableFrame)
         try:
             avail = max(320, int(self.classes_scroll.canvas.winfo_width()))
         except Exception:
             avail = 800
 
-        # policz liczbę kolumn względem „docelowej” szerokości komórki
         cols = int(round(avail / float(self.CLASS_CELL_PX)))
         cols = max(self.CLASS_COL_MIN, min(self.CLASS_COL_MAX, cols))
         self._class_cols = cols
 
-        # rzeczywista szerokość kolumny tak, by sumarycznie wypełnić dostępny obszar
         col_w = max(120, (avail // cols))
 
-        # ustaw równy „minsize” dla każdej kolumny siatki
         for c in range(cols):
             container.grid_columnconfigure(c, minsize=col_w, weight=1, uniform="classes")
 
-        # narysuj pola — każde w „komórce” o stałej szerokości; Checkbutton = wrap do szerokości
         for i, nm in enumerate(id2name):
             var = tk.BooleanVar(value=(i in previously_selected))
             r, c = divmod(i, cols)
 
             cell = tk.Frame(container, width=col_w)
             cell.grid(row=r, column=c, sticky="nw", padx=6, pady=3)
-            # zablokuj autoskalowanie, zachowaj stałą szerokość komórki
             cell.grid_propagate(False)
 
             cb = tk.Checkbutton(cell, text=nm, variable=var, anchor="w", justify="left",
@@ -297,7 +379,6 @@ class App(AppUIMixin, tk.Tk):
             self.class_vars.append((nm, var, i))
 
     def _calc_class_cols(self, width: int | None = None) -> int:
-        """(zostawione dla zgodności) – liczy kolumny z dostępnej szerokości."""
         try:
             if width is None:
                 width = max(320, self.classes_scroll.canvas.winfo_width())
@@ -307,10 +388,6 @@ class App(AppUIMixin, tk.Tk):
         return max(self.CLASS_COL_MIN, min(self.CLASS_COL_MAX, cols))
 
     def _on_classes_canvas_config(self, event):
-        """
-        Reakcja na zmianę szerokości obszaru klas.
-        Przy dużej zmianie – przerysowujemy; przy drobnej – tylko aktualizujemy minsize kolumn.
-        """
         try:
             avail = max(320, int(event.width))
         except Exception:
@@ -322,7 +399,6 @@ class App(AppUIMixin, tk.Tk):
             if self.names is not None:
                 self._populate_classes(self.names)
         else:
-            # ta sama liczba kolumn – wystarczy dopasować minsize (kolumny „rozjadą” się równo)
             col_w = max(120, (avail // max(1, self._class_cols)))
             for c in range(self._class_cols):
                 try:
@@ -333,25 +409,55 @@ class App(AppUIMixin, tk.Tk):
     def selected_class_indices(self):
         return [idx for (nm, v, idx) in self.class_vars if v.get()]
 
-    # ========== OPCJE ZAAWANSOWANE (z presetami) ==========
+    # ========== ADVANCED OPTIONS (with dynamic help) ==========
     def open_advanced(self):
-        """
-        Okno 'Opcje zaawansowane' – minimalny, zgodny z obecnym projektem:
-        - trace_color / trace_thickness
-        - overlay_frame_color / overlay_frame_thickness
-        - alert_zone_inside (1=w strefie, 0=poza)
-        - standardowe pola z presetów (imgsz/conf/iou/frame_skip/...).
-        """
+        """Advanced options window — with a right-side context help panel."""
         from tkinter import colorchooser
 
         win = tk.Toplevel(self)
-        win.transient(self)     # trzymaj nad głównym
-        win.grab_set()          # modalnie (nie „ucieknie” pod spód)
+        win.transient(self)
+        win.grab_set()
         win.lift(); win.focus_force()
-        win.title("Opcje zaawansowane")
-        win.geometry("700x780")
+        win.title("Advanced options")
+        win.geometry("980x780")
 
-        # Baza z presetów lub aktualnego override
+        # two-pane layout
+        root = tk.Frame(win); root.pack(fill="both", expand=True)
+        left = tk.Frame(root); left.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+        right = tk.Frame(root, width=360); right.pack(side="left", fill="y", padx=(8, 8), pady=8)
+
+        # right-side help widgets
+        help_title = tk.Label(right, text="Help", font=("TkDefaultFont", 10, "bold"), anchor="w")
+        help_title.pack(fill="x", pady=(0,4))
+        hl = tk.Frame(right); hl.pack(fill="both", expand=True)
+        sb = tk.Scrollbar(hl, orient="vertical")
+        help_text = tk.Text(hl, wrap="word", yscrollcommand=sb.set)
+        sb.config(command=help_text.yview)
+        sb.pack(side="right", fill="y")
+        help_text.pack(side="left", fill="both", expand=True)
+        def set_help(title: str, body: str):
+            try:
+                help_title.config(text=title or "Help")
+                help_text.config(state="normal")
+                help_text.delete("1.0", "end")
+                help_text.insert("1.0", body or "")
+                help_text.config(state="disabled")
+            except Exception:
+                pass
+        set_help("Tips", ADV_HELP_INTRO)
+
+        def attach_help(widget, key: str):
+            """Bind hover/focus events to show mapped help."""
+            title, body = ADV_HELP_BY_KEY.get(key, (key, ""))
+            def _show(_e=None, t=title, b=body):
+                set_help(t, b)
+            try:
+                widget.bind("<FocusIn>", _show)
+                widget.bind("<Enter>", _show)
+            except Exception:
+                pass
+
+        # Base from presets or current override
         p = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
         base = self.adv_params if getattr(self, "advanced_override", False) else {
             **p,
@@ -368,7 +474,6 @@ class App(AppUIMixin, tk.Tk):
             "alert_freq": int(self.alert_freq.get()),
             "alert_dur": int(self.alert_dur.get()),
             "alert_freeze": int(self.alert_freeze.get()),
-            # nowe (domyślne)
             "trace_color": str(self.adv_params.get("trace_color", "auto")) if getattr(self, "advanced_override", False) else "auto",
             "trace_thickness": int(self.adv_params.get("trace_thickness", 2)) if getattr(self, "advanced_override", False) else 2,
             "overlay_frame_color": str(self.adv_params.get("overlay_frame_color", "auto")) if getattr(self, "advanced_override", False) else "auto",
@@ -376,86 +481,77 @@ class App(AppUIMixin, tk.Tk):
             "alert_zone_inside": int(self.adv_params.get("alert_zone_inside", 1)) if getattr(self, "advanced_override", False) else 1,
         }
 
-        def row(parent, label, var, w=18):
+        def row(parent, label, var, w=18, key: str|None=None):
             f = tk.Frame(parent); f.pack(fill="x", pady=3)
             tk.Label(f, text=label, width=26, anchor="w").pack(side="left")
-            ent = tk.Entry(f, textvariable=var, width=w); ent.pack(side="left")
+            ent = tk.Entry(f, textvariable=var, width=w)
+            ent.pack(side="left")
+            if key: attach_help(ent, key)
             return f, ent
 
-        # --- Sekcja: Detekcja/Tracking/Histereza ---
-        frm_basic = tk.LabelFrame(win, text="Detekcja / Tracking / Histereza"); frm_basic.pack(fill="x", padx=8, pady=6)
-        v_imgsz = tk.StringVar(value=str(base.get("imgsz", "")))
-        v_conf  = tk.StringVar(value=str(base.get("conf", "")))
-        v_iou   = tk.StringVar(value=str(base.get("iou", "")))
-        v_skip  = tk.StringVar(value=str(base.get("frame_skip", "")))
-        v_buf   = tk.StringVar(value=str(base.get("track_buffer", "")))
-        v_match = tk.StringVar(value=str(base.get("match_thresh", "")))
-        v_hits  = tk.StringVar(value=str(base.get("min_hits", "")))
-        v_lgap  = tk.StringVar(value=str(base.get("line_min_gap", "")))
-        v_lsep  = tk.StringVar(value=str(base.get("line_min_sep", "")))
-        v_zhgap = tk.StringVar(value=str(base.get("zone_min_gap", "")))
-        for lab, var in [("imgsz",v_imgsz),("conf",v_conf),("iou",v_iou),("frame_skip",v_skip),
-                         ("track_buffer",v_buf),("match_thresh",v_match),("min_hits",v_hits),
-                         ("line_min_gap_frames",v_lgap),("line_min_sep_px",v_lsep),("zone_min_gap_frames",v_zhgap)]:
-            row(frm_basic, lab, var)
+        # --- Detection/Tracking/Hysteresis ---
+        frm_basic = tk.LabelFrame(left, text="Detection / Tracking / Hysteresis"); frm_basic.pack(fill="x", padx=0, pady=6)
+        v_imgsz = tk.StringVar(value=str(base.get("imgsz", "")));     row(frm_basic, "imgsz", v_imgsz, key="imgsz")
+        v_conf  = tk.StringVar(value=str(base.get("conf", "")));      row(frm_basic, "conf", v_conf, key="conf")
+        v_iou   = tk.StringVar(value=str(base.get("iou", "")));       row(frm_basic, "iou", v_iou, key="iou")
+        v_skip  = tk.StringVar(value=str(base.get("frame_skip", "")));row(frm_basic, "frame_skip", v_skip, key="frame_skip")
+        v_buf   = tk.StringVar(value=str(base.get("track_buffer", ""))); row(frm_basic, "track_buffer", v_buf, key="track_buffer")
+        v_match = tk.StringVar(value=str(base.get("match_thresh", ""))); row(frm_basic, "match_thresh", v_match, key="match_thresh")
+        v_hits  = tk.StringVar(value=str(base.get("min_hits", "")));  row(frm_basic, "min_hits", v_hits, key="min_hits")
+        v_lgap  = tk.StringVar(value=str(base.get("line_min_gap", ""))); row(frm_basic, "line_min_gap_frames", v_lgap, key="line_min_gap_frames")
+        v_lsep  = tk.StringVar(value=str(base.get("line_min_sep", ""))); row(frm_basic, "line_min_sep_px", v_lsep, key="line_min_sep_px")
+        v_zhgap = tk.StringVar(value=str(base.get("zone_min_gap", ""))); row(frm_basic, "zone_min_gap_frames", v_zhgap, key="zone_min_gap_frames")
 
-        # --- Sekcja: Wizualizacja / Trace / Anchor / Ghost ---
-        frm_vis = tk.LabelFrame(win, text="Wizualizacja / Trace / Anchor / Ghost"); frm_vis.pack(fill="x", padx=8, pady=6)
+        # --- Overlay / Trace / Anchor / Ghost ---
+        frm_vis = tk.LabelFrame(left, text="Overlay / Trace / Anchor / Ghost"); frm_vis.pack(fill="x", padx=0, pady=6)
         v_prev  = tk.BooleanVar(value=bool(base.get("preview_enabled", True)))
         v_trace = tk.BooleanVar(value=bool(base.get("trace_enabled", True)))
         v_tlen  = tk.IntVar(value=int(base.get("trace_len", 24)))
         v_anch  = tk.StringVar(value=str(base.get("anchor_mode", "center")))
         v_ghost = tk.IntVar(value=int(base.get("ghost_margin", 12)))
-        tk.Checkbutton(frm_vis, text="Włącz podgląd LIVE", variable=v_prev).pack(side="left", padx=6, pady=4)
-        tk.Checkbutton(frm_vis, text="Trace", variable=v_trace).pack(side="left", padx=(12,4))
+        cb_prev = tk.Checkbutton(frm_vis, text="Enable LIVE preview", variable=v_prev); cb_prev.pack(side="left", padx=6, pady=4); attach_help(cb_prev, "preview_enabled")
+        cb_trace= tk.Checkbutton(frm_vis, text="Trace", variable=v_trace); cb_trace.pack(side="left", padx=(12,4)); attach_help(cb_trace, "trace_enabled")
         tk.Label(frm_vis, text="len:").pack(side="left")
-        tk.Spinbox(frm_vis, from_=0, to=300, width=5, textvariable=v_tlen).pack(side="left", padx=(2, 12))
+        sp_len = tk.Spinbox(frm_vis, from_=0, to=300, width=5, textvariable=v_tlen); sp_len.pack(side="left", padx=(2, 12)); attach_help(sp_len, "trace_len")
         tk.Label(frm_vis, text="Anchor:").pack(side="left")
-        ttk.Combobox(frm_vis, values=["bottom","center"], width=8, state="readonly",
-                     textvariable=v_anch).pack(side="left", padx=(3, 12))
+        cb_anchor = ttk.Combobox(frm_vis, values=["bottom","center"], width=8, state="readonly", textvariable=v_anch)
+        cb_anchor.pack(side="left", padx=(3, 12)); attach_help(cb_anchor, "anchor_mode")
         tk.Label(frm_vis, text="Ghost margin (px):").pack(side="left")
-        tk.Spinbox(frm_vis, from_=0, to=64, width=5, textvariable=v_ghost).pack(side="left", padx=(3, 6))
+        sp_ghost = tk.Spinbox(frm_vis, from_=0, to=64, width=5, textvariable=v_ghost); sp_ghost.pack(side="left", padx=(3, 6)); attach_help(sp_ghost, "ghost_margin")
 
-        # --- Sekcja: Kolory/grubości + color pickery ---
-        frm_colors = tk.LabelFrame(win, text="Kolory/grubości (wizualizacja)"); frm_colors.pack(fill="x", padx=8, pady=6)
+        # --- Colors/Thickness + pickers ---
+        frm_colors = tk.LabelFrame(left, text="Colors/Thickness (overlay)"); frm_colors.pack(fill="x", padx=0, pady=6)
         v_tcolor = tk.StringVar(value=str(base.get("trace_color", "auto")))
         v_tth    = tk.IntVar(value=int(base.get("trace_thickness", 2)))
         v_fcolor = tk.StringVar(value=str(base.get("overlay_frame_color", "auto")))
         v_fth    = tk.IntVar(value=int(base.get("overlay_frame_thickness", 2)))
 
-        r1, _ = row(frm_colors, "Kolor śladu (auto/#RRGGBB/B,G,R)", v_tcolor, w=18)
-        tk.Button(r1, text="Wybierz…", command=lambda: _pick_to_var(v_tcolor)).pack(side="left", padx=6)
+        r1, ent_tcolor = row(frm_colors, "Trace color (auto/#RRGGBB/B,G,R)", v_tcolor, w=18, key="trace_color")
+        tk.Button(r1, text="Pick…", command=lambda: _pick_to_var(v_tcolor)).pack(side="left", padx=6)
         f = tk.Frame(frm_colors); f.pack(fill="x", pady=2)
-        tk.Label(f, text="Grubość śladu (px)", width=26, anchor="w").pack(side="left")
-        tk.Spinbox(f, from_=0, to=16, width=6, textvariable=v_tth).pack(side="left")
+        tk.Label(f, text="Trace thickness (px)", width=26, anchor="w").pack(side="left")
+        sp_tth = tk.Spinbox(f, from_=0, to=16, width=6, textvariable=v_tth); sp_tth.pack(side="left"); attach_help(sp_tth, "trace_thickness")
 
-        r2, _ = row(frm_colors, "Kolor ramki (auto/#RRGGBB/B,G,R)", v_fcolor, w=18)
-        tk.Button(r2, text="Wybierz…", command=lambda: _pick_to_var(v_fcolor)).pack(side="left", padx=6)
+        r2, ent_fcolor = row(frm_colors, "Frame color (auto/#RRGGBB/B,G,R)", v_fcolor, w=18, key="overlay_frame_color")
+        tk.Button(r2, text="Pick…", command=lambda: _pick_to_var(v_fcolor)).pack(side="left", padx=6)
         f2 = tk.Frame(frm_colors); f2.pack(fill="x", pady=2)
-        tk.Label(f2, text="Grubość ramki (px)", width=26, anchor="w").pack(side="left")
-        tk.Spinbox(f2, from_=0, to=16, width=6, textvariable=v_fth).pack(side="left")
+        tk.Label(f2, text="Frame thickness (px)", width=26, anchor="w").pack(side="left")
+        sp_fth = tk.Spinbox(f2, from_=0, to=16, width=6, textvariable=v_fth); sp_fth.pack(side="left"); attach_help(sp_fth, "overlay_frame_thickness")
 
         def _pick_to_var(var):
             try:
                 init = var.get().strip()
-                # parent=win -> picker nad "Zaawansowane"
-                rgb, hexv = colorchooser.askcolor(
-                    initialcolor=init if init.startswith("#") else None,
-                    title="Wybierz kolor",
-                    parent=win
-                )
+                from tkinter import colorchooser
+                rgb, hexv = colorchooser.askcolor(initialcolor=init if init.startswith("#") else None, title="Pick a color", parent=win)
                 if hexv:
                     var.set(hexv.upper())
-                win.lift(); win.focus_force()  # po zamknięciu pickera "Zaawansowane" wraca na wierzch
+                win.lift(); win.focus_force()
             except Exception:
                 pass
 
-        # --- Sekcja: Alert dźwiękowy (strefy) ---
-        # --- Alert dźwiękowy (strefy) ---
-        frame_alert = tk.LabelFrame(win, text="Alert dźwiękowy (strefy)")
-        frame_alert.pack(fill="x", padx=8, pady=6)
+        # --- Sound alert (zones) ---
+        frame_alert = tk.LabelFrame(left, text="Sound alert (zones)"); frame_alert.pack(fill="x", padx=0, pady=6)
 
-        # [WAŻNE] Definicje zmiennych (muszą być przed budową wierszy)
         v_a_en   = tk.BooleanVar(value=bool(base.get("alert_enabled", False)))
         v_a_cls  = tk.StringVar(value=str(base.get("alert_classes", "person")))
         v_a_freq = tk.IntVar(value=int(base.get("alert_freq", 880)))
@@ -463,26 +559,23 @@ class App(AppUIMixin, tk.Tk):
         v_a_free = tk.IntVar(value=int(base.get("alert_freeze", 1500)))
         v_a_where= tk.IntVar(value=int(base.get("alert_zone_inside", 1)))  # 1=inside, 0=outside
 
-        # RZĄD 1: włącznik + klasy + Hz/ms/freeze (jeden wiersz)
         r1 = tk.Frame(frame_alert); r1.pack(fill="x", padx=6, pady=2)
-        tk.Checkbutton(r1, text="Włącz alert", variable=v_a_en).pack(side="left", padx=(0,8))
-        tk.Label(r1, text="Klasy (CSV):").pack(side="left")
-        tk.Entry(r1, textvariable=v_a_cls, width=22).pack(side="left", padx=(3, 10))
+        cb_a_en = tk.Checkbutton(r1, text="Enable alert", variable=v_a_en); cb_a_en.pack(side="left", padx=(0,8)); attach_help(cb_a_en, "alert_enabled")
+        tk.Label(r1, text="Classes (CSV):").pack(side="left")
+        ent_a_cls = tk.Entry(r1, textvariable=v_a_cls, width=22); ent_a_cls.pack(side="left", padx=(3, 10)); attach_help(ent_a_cls, "alert_classes")
         tk.Label(r1, text="Hz:").pack(side="left")
-        tk.Spinbox(r1, from_=200, to=4000, width=6, textvariable=v_a_freq).pack(side="left", padx=(3, 10))
+        sp_a_hz = tk.Spinbox(r1, from_=200, to=4000, width=6, textvariable=v_a_freq); sp_a_hz.pack(side="left", padx=(3, 10)); attach_help(sp_a_hz, "alert_freq")
         tk.Label(r1, text="ms:").pack(side="left")
-        tk.Spinbox(r1, from_=30, to=2000, width=6, textvariable=v_a_dur).pack(side="left", padx=(3, 10))
+        sp_a_ms = tk.Spinbox(r1, from_=30, to=2000, width=6, textvariable=v_a_dur); sp_a_ms.pack(side="left", padx=(3, 10)); attach_help(sp_a_ms, "alert_dur")
         tk.Label(r1, text="freeze (ms):").pack(side="left")
-        tk.Spinbox(r1, from_=0, to=10000, width=7, textvariable=v_a_free).pack(side="left", padx=(3, 6))
+        sp_a_fr = tk.Spinbox(r1, from_=0, to=10000, width=7, textvariable=v_a_free); sp_a_fr.pack(side="left", padx=(3, 6)); attach_help(sp_a_fr, "alert_freeze")
 
-        # RZĄD 2: TRYB (dokładnie POD rzędem 1)
         r2 = tk.Frame(frame_alert); r2.pack(fill="x", padx=6, pady=(6,4))
-        tk.Label(r2, text="Tryb:", width=8, anchor="w").pack(side="left")
-        tk.Radiobutton(r2, text="w strefie",  variable=v_a_where, value=1).pack(side="left", padx=(3,12))
-        tk.Radiobutton(r2, text="poza strefą", variable=v_a_where, value=0).pack(side="left", padx=(3,2))
+        tk.Label(r2, text="Mode:", width=8, anchor="w").pack(side="left")
+        rb_in  = tk.Radiobutton(r2, text="inside zone",  variable=v_a_where, value=1); rb_in.pack(side="left", padx=(3,12)); attach_help(rb_in, "alert_zone_inside")
+        rb_out = tk.Radiobutton(r2, text="outside zone", variable=v_a_where, value=0); rb_out.pack(side="left", padx=(3,2)); attach_help(rb_out, "alert_zone_inside")
 
-
-        # ---- zapis/odczyt pól ----
+        # ---- read/write fields ----
         def _collect() -> dict:
             cur = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
             def _get(var, cast, key, dflt):
@@ -523,7 +616,7 @@ class App(AppUIMixin, tk.Tk):
                 params = _collect()
                 self.adv_params = params
                 self.advanced_override = True
-                # zsynchronizuj z polami używanymi w run()
+                # sync with fields used in run()
                 self.preview_enabled.set(params["preview_enabled"])
                 self.trace_enabled.set(params["trace_enabled"])
                 self.trace_len.set(params["trace_len"])
@@ -534,27 +627,24 @@ class App(AppUIMixin, tk.Tk):
                 self.alert_freq.set(params["alert_freq"])
                 self.alert_dur.set(params["alert_dur"])
                 self.alert_freeze.set(params["alert_freeze"])
-                self._log("[ADV] Zastosowano override (z pól).")
+                self._log("[ADV] Applied override (from fields).")
                 win.destroy()
             except Exception as e:
                 messagebox.showerror("Adv", str(e))
 
         def _reset():
             self.advanced_override = False
-            self._log("[ADV] Przywrócono preset z suwaka jakości.")
+            self._log("[ADV] Restored preset from quality slider.")
             win.destroy()
 
-        btns = tk.Frame(win); btns.pack(fill="x", pady=10)
-        tk.Button(btns, text="Zastosuj", command=_apply).pack(side="left", padx=6)
-        tk.Button(btns, text="Przywróć preset z suwaka", command=_reset).pack(side="left", padx=6)
-
-
-
+        btns = tk.Frame(left); btns.pack(fill="x", pady=10)
+        tk.Button(btns, text="Apply", command=_apply).pack(side="left", padx=6)
+        tk.Button(btns, text="Restore preset from slider", command=_reset).pack(side="left", padx=6)
 
     # ========== START / ABORT ==========
     def abort(self):
         self.abort_event.set()
-        self._set_progress(None, "Przerywam…")
+        self._set_progress(None, "Aborting…")
         def _wait_and_reset():
             try:
                 if self.worker_thread is not None:
@@ -568,7 +658,7 @@ class App(AppUIMixin, tk.Tk):
                     except Exception:
                         pass
                     self.progress_var.set(0.0)
-                    self.progress_label.set("Przerwano. Gotowe.")
+                    self.progress_label.set("Aborted. Ready.")
                     self.btn_start.config(state="normal")
                     self.btn_abort.config(state="disabled")
                     self._destroy_preview_window()
@@ -581,20 +671,20 @@ class App(AppUIMixin, tk.Tk):
             self.abort_event.clear()
             self.btn_start.config(state="disabled")
             self.btn_abort.config(state="normal")
-            self._set_progress(0.0, "Przygotowuję…")
+            self._set_progress(0.0, "Preparing…")
 
             sources = []
             base_in = None
             if hasattr(self, "src_mode") and self.src_mode.get() == "camera":
                 try: cam_idx = int(self.cam_index.get().strip())
                 except Exception:
-                    messagebox.showerror("Kamera", "Index kamery musi być liczbą całkowitą.")
+                    messagebox.showerror("Camera", "Camera index must be an integer.")
                     self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
                 sources = [cam_idx]
             elif hasattr(self, "src_mode") and self.src_mode.get() == "url":
                 url = self.url_input.get().strip()
                 if not url:
-                    messagebox.showerror("URL", "Podaj RTSP/HTTP URL strumienia.")
+                    messagebox.showerror("URL", "Provide RTSP/HTTP stream URL.")
                     self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
                 sources = [url]
             else:
@@ -604,11 +694,11 @@ class App(AppUIMixin, tk.Tk):
                 else:
                     inp = Path(self.input_dir.get().strip())
                     if not inp.exists():
-                        messagebox.showerror("Wejście", "Wskaż poprawny folder lub pliki.")
+                        messagebox.showerror("Input", "Select a valid folder or files.")
                         self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
                     sources = sorted([p for p in inp.iterdir() if p.suffix.lower() in SUPPORTED_VID_EXTS])
                     if not sources:
-                        self._log("Brak plików wideo w folderze.")
+                        self._log("No video files in the folder.")
                         self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
                     base_in = inp
 
@@ -619,7 +709,7 @@ class App(AppUIMixin, tk.Tk):
 
             selected_idx = self.selected_class_indices()
             if not selected_idx:
-                messagebox.showwarning("Klasy", "Zaznacz co najmniej jedną klasę.")
+                messagebox.showwarning("Classes", "Select at least one class.")
                 self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled"); return
 
             out_base = Path(self.output_dir.get().strip()) if self.output_dir.get().strip() else (base_in or Path.cwd())
@@ -630,7 +720,7 @@ class App(AppUIMixin, tk.Tk):
             self.worker_thread.start()
         except Exception as e:
             self.btn_start.config(state="normal"); self.btn_abort.config(state="disabled")
-            messagebox.showerror("Błąd", str(e))
+            messagebox.showerror("Error", str(e))
 
     # ========== log / progress / ETA ==========
     def _log(self, msg):
@@ -664,12 +754,12 @@ class App(AppUIMixin, tk.Tk):
         m = int(remain // 60); s = int(remain % 60)
         return f"{m:02d}:{s:02d}"
 
-    # ========== PREVIEW okno ==========
+    # ========== PREVIEW window ==========
     def _ensure_preview_window(self):
         if self._preview_win and (self._preview_win.winfo_exists()):
             return
         win = tk.Toplevel(self)
-        win.title("Podgląd (LIVE)")
+        win.title("Preview (LIVE)")
         win.geometry("860x520")
         win.protocol("WM_DELETE_WINDOW", lambda: self._destroy_preview_window())
         lbl = tk.Label(win, anchor="center", bg="#111")

@@ -1,4 +1,4 @@
-# cv_video_core.py — stałe i utilsy współdzielone
+# cv_video_core.py — shared constants and utilities
 from __future__ import annotations
 from pathlib import Path
 import json, zipfile
@@ -6,12 +6,12 @@ import cv2
 import pandas as pd
 import torch
 
-# ====== STAŁE ======
+# ====== CONSTANTS ======
 SUPPORTED_VID_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".m4v", ".wmv", ".mpg", ".mpeg", ".ts")
 MODEL_DIRNAME = "models"
 
 VIDEO_PRESETS = {
-    1: {"imgsz": 320,  "conf": 0.50, "iou": 0.60, "frame_skip": 2, "track_buffer": 5, "match_thresh": 0.80, "min_hits": 2},
+    1: {"imgsz": 320,  "conf": 0.50, "iou": 0.60, "frame_skip": 2, "track_buffer": 5,  "match_thresh": 0.80, "min_hits": 2},
     2: {"imgsz": 640,  "conf": 0.55, "iou": 0.55, "frame_skip": 2, "track_buffer": 30, "match_thresh": 0.80, "min_hits": 2},
     3: {"imgsz": 960,  "conf": 0.60, "iou": 0.50, "frame_skip": 1, "track_buffer": 60, "match_thresh": 0.78, "min_hits": 2},
     4: {"imgsz": 1280, "conf": 0.65, "iou": 0.50, "frame_skip": 1, "track_buffer": 75, "match_thresh": 0.75, "min_hits": 3},
@@ -20,9 +20,9 @@ VIDEO_PRESETS = {
 DEFAULT_QUALITY = 1
 DEFAULT_TRACKER = "bytetrack"
 
-LINE_MIN_GAP_FRAMES_DEFAULT = 8
-LINE_MIN_SEP_PX_DEFAULT    = 12
-ZONE_MIN_GAP_FRAMES_DEFAULT = 6
+LINE_MIN_GAP_FRAMES_DEFAULT  = 8
+LINE_MIN_SEP_PX_DEFAULT      = 12
+ZONE_MIN_GAP_FRAMES_DEFAULT  = 6
 
 # ====== UTIL ======
 def ensure_dir(p: Path) -> Path:
@@ -51,9 +51,9 @@ def resolve_weights_to_pt(path: Path, extract_dir: Path) -> Path:
         ensure_dir(extract_dir)
         with zipfile.ZipFile(path, "r") as z: z.extractall(extract_dir)
         pts = list(extract_dir.rglob("*.pt"))
-        if not pts: raise RuntimeError("W archiwum .zip nie znaleziono pliku .pt")
+        if not pts: raise RuntimeError("No .pt file found inside the .zip archive")
         pts.sort(key=score_weight_name, reverse=True); return pts[0]
-    raise ValueError("Wybierz .pt lub .zip")
+    raise ValueError("Select a .pt or .zip file")
 
 def numbered_path(path: Path) -> Path:
     if not path.exists(): return path

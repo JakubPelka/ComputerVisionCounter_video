@@ -1,7 +1,7 @@
 # env_guard.py
-# Pilnuje, by importy szły z lokalnego ./_pkgs i żeby wersje były zgodne z YOLOv11.
-# Nie instaluje pakietów (tym zajmuje się bootstrap) — tu tylko weryfikujemy i
-# pokazujemy czytelny komunikat, jeśli coś jest nie tak.
+# Ensures imports come from local ./_pkgs and that versions are compatible with YOLOv11.
+# This module does NOT install packages (that’s handled by the bootstrap). It only verifies
+# and raises clear errors if something is wrong.
 
 from __future__ import annotations
 import os, sys, importlib
@@ -28,30 +28,31 @@ class EnvInfo:
 def _prefer_local_pkgs(strict_local: bool = True) -> None:
     if PKGS.exists():
         sp = str(PKGS)
-        # _pkgs na początek sys.path
+        # Put _pkgs at the beginning of sys.path
         sys.path[:] = [sp] + [p for p in sys.path if p != sp]
         if strict_local:
-            # usuń globalne site-packages (żeby nic się nie „domieszało”)
+            # Remove global site-packages (avoid mixing with system-installed libs)
             sys.path[:] = [p for p in sys.path if ("site-packages" not in p.lower()) or (sp in p)]
 
 def apply(strict_local: bool = True, need_lap: bool = True) -> EnvInfo:
     """
-    Używaj na SAMYM początku skryptu:
+    Use at the VERY beginning of your script:
         from env_guard import apply as _env_apply
         _env_apply(strict_local=True)
-    Zwraca EnvInfo z wersjami/ścieżkami.
+
+    Returns an EnvInfo with versions/paths.
     """
     if not PKGS.exists():
         raise RuntimeError(
-            "Brak folderu ./_pkgs (lokalne pakiety). Uruchom:\n"
-            "  python bootstrap_env.py unidrone_video_dev.py\n"
-            "lub przygotuj _pkgs ręcznie."
+            "Missing ./_pkgs (local packages). Launch via:\n"
+            "  python start.py\n"
+            "…or prepare _pkgs manually."
         )
 
     _prefer_local_pkgs(strict_local=strict_local)
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "True")
 
-    # Importy z _pkgs
+    # Imports from _pkgs
     try:
         torch       = importlib.import_module("torch")
         torchvision = importlib.import_module("torchvision")
@@ -60,40 +61,40 @@ def apply(strict_local: bool = True, need_lap: bool = True) -> EnvInfo:
         ultralytics = importlib.import_module("ultralytics")
     except Exception as e:
         raise RuntimeError(
-            "Nie udało się załadować podstawowych pakietów z ./_pkgs.\n"
-            "Uruchom przez bootstrap_env.py lub sprawdź zawartość _pkgs.\n"
-            f"Szczegóły: {e}"
+            "Failed to load the core packages from ./_pkgs.\n"
+            "Run via start.py or check the contents of _pkgs.\n"
+            f"Details: {e}"
         )
 
-    # Spójność: oba z _pkgs
+    # Consistency: ensure both Torch and TorchVision import from ./_pkgs
     t_loc  = str(Path(torch.__file__).resolve())
     tv_loc = str(Path(torchvision.__file__).resolve())
     if strict_local and (str(PKGS) not in t_loc or str(PKGS) not in tv_loc):
         raise RuntimeError(
-            "Wykryto mieszankę TORCH/TORCHVISION (nie importują się z ./_pkgs).\n"
+            "Detected mixed TORCH/TORCHVISION sources (not importing from ./_pkgs).\n"
             f"torch:       {t_loc}\n"
             f"torchvision: {tv_loc}\n\n"
-            "Startuj przez: python bootstrap_env.py unidrone_video_dev.py"
+            "Launch via: python start.py"
         )
 
-    # YOLOv11 wymaga torch.library.register_fake
+    # YOLOv11 requires torch.library.register_fake
     if not hasattr(torch, "library") or not hasattr(torch.library, "register_fake"):
         raise RuntimeError(
-            "Torch za stary dla YOLOv11 (brak torch.library.register_fake).\n"
-            "Uruchom przez bootstrap_env.py i pozwól mu przygotować właściwe wersje."
+            "Torch is too old for YOLOv11 (missing torch.library.register_fake).\n"
+            "Run via start.py and let it prepare compatible versions."
         )
 
-    # Ultralytics: blok C3k2 (modele YOLOv11)
+    # Ultralytics: must have C3k2 block (YOLOv11)
     try:
         from ultralytics.nn.modules import block as _blk
         if not hasattr(_blk, "C3k2"):
             raise RuntimeError(
-                "Zbyt stary Ultralytics (brak bloku C3k2). Użyj bootstrapa, żeby zaktualizować."
+                "Ultralytics is too old (missing C3k2 block). Use the bootstrap to update."
             )
     except Exception as e:
-        raise RuntimeError(f"Weryfikacja Ultralytics nie powiodła się: {e}")
+        raise RuntimeError(f"Ultralytics verification failed: {e}")
 
-    # lap – wymagany przez trackery
+    # lap – required by trackers
     lap_ver, lap_loc = None, None
     if need_lap:
         try:
@@ -102,13 +103,13 @@ def apply(strict_local: bool = True, need_lap: bool = True) -> EnvInfo:
             lap_loc = str(Path(lap.__file__).resolve())
             if strict_local and str(PKGS) not in lap_loc:
                 raise RuntimeError(
-                    "‘lap’ importuje się spoza ./_pkgs — Ultralytics może próbować AutoUpdate.\n"
-                    "Uruchom przez bootstrap_env.py, aby doinstalować ‘lap’ do _pkgs."
+                    "'lap' is importing from outside ./_pkgs — Ultralytics may attempt AutoUpdate.\n"
+                    "Run via start.py to install 'lap' into _pkgs."
                 )
         except Exception as e:
             raise RuntimeError(
-                f"Brak modułu ‘lap’ w ./_pkgs (wymagany do trackingu). Szczegóły: {e}\n"
-                "Uruchom przez bootstrap_env.py (zadba o lap) albo:\n"
+                f"Module 'lap' is missing in ./_pkgs (required for tracking). Details: {e}\n"
+                "Run via start.py (it will install 'lap') or manually:\n"
                 "  py -3.12 -m pip install --target _pkgs lap>=0.5.12"
             )
 

@@ -1,8 +1,8 @@
-# convert.py
-# Prosty preproces do MP4: najpierw REMUX (bezstratnie), gdy trzeba fallback TRANSCODING (H.264/AAC)
-# - GUI (tkinter) lub CLI
-# - Wyszukuje ffmpeg w PATH albo w ./bin/ffmpeg(.exe)
-# - Zapis do <wyjściowy>/converted/<nazwa>.mp4 (z auto-numeracją, jeśli plik istnieje)
+# covert.py
+# Simple pre-process to MP4: first try REMUX (lossless), if needed fallback to TRANSCODING (H.264/AAC).
+# - GUI (tkinter) or CLI
+# - Searches for ffmpeg in PATH or in ./bin/ffmpeg(.exe)
+# - Saves to <output>/converted/<name>.mp4 (auto-numbered if the file already exists)
 
 from __future__ import annotations
 import sys, os, shutil, subprocess, threading, time
@@ -10,11 +10,11 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-# --------- USTAWIENIA DOMYŚLNE ---------
+# --------- DEFAULT SETTINGS ---------
 DEFAULT_OUT_SUBDIR = "converted"
-VIDEO_FILTER = [("Wideo", "*.m2ts *.mts *.ts *.mp4 *.mov *.avi *.mkv *.m4v *.wmv"), ("Wszystkie pliki", "*.*")]
+VIDEO_FILTER = [("Video", "*.m2ts *.mts *.ts *.mp4 *.mov *.avi *.mkv *.m4v *.wmv"), ("All files", "*.*")]
 
-# --------- narzędzia ---------
+# --------- utilities ---------
 def ensure_dir(p: Path) -> Path:
     p.mkdir(parents=True, exist_ok=True); return p
 
@@ -22,7 +22,7 @@ def which_ffmpeg() -> str | None:
     # 1) PATH
     exe = shutil.which("ffmpeg")
     if exe: return exe
-    # 2) lokalny portable
+    # 2) local portable
     here = Path(__file__).parent
     for cand in ["bin/ffmpeg.exe", "bin/ffmpeg"]:
         p = here / cand
@@ -31,7 +31,7 @@ def which_ffmpeg() -> str | None:
     return None
 
 def numbered_path(path: Path) -> Path:
-    """Jeśli plik istnieje, dopisz sufiks _N."""
+    """If the file exists, append suffix _N."""
     if not path.exists():
         return path
     stem, suf = path.stem, path.suffix
@@ -43,7 +43,7 @@ def numbered_path(path: Path) -> Path:
         i += 1
 
 def run_ffmpeg(cmd: list[str], abort_event: threading.Event|None=None) -> int:
-    """Uruchamia ffmpeg i pozwala przerwać (ABORT). Zwraca kod wyjścia."""
+    """Run ffmpeg and allow aborting via Event. Returns process exit code."""
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
         while True:
@@ -63,11 +63,11 @@ def run_ffmpeg(cmd: list[str], abort_event: threading.Event|None=None) -> int:
         return 1
 
 def convert_one(ffmpeg: str, src: Path, out_root: Path, abort_event: threading.Event|None=None, log=print) -> Path|None:
-    """Spróbuj REMUX -> fallback TRANSCODE. Zwróć ścieżkę wynikową lub None."""
+    """Try REMUX → fallback to TRANSCODE. Return output path or None."""
     out_dir = ensure_dir(out_root / DEFAULT_OUT_SUBDIR)
     out_mp4 = numbered_path(out_dir / (src.stem + ".mp4"))
 
-    # A) REMUX (bezstratnie)
+    # A) REMUX (lossless)
     remux_cmd = [
         ffmpeg, "-y", "-hide_banner",
         "-i", str(src),
@@ -82,12 +82,12 @@ def convert_one(ffmpeg: str, src: Path, out_root: Path, abort_event: threading.E
         log("   OK (remux).")
         return out_mp4
     if rc == -9:
-        log("   PRZERWANO.")
+        log("   ABORTED.")
         return None
-    log("   Remux nieudany → transkodowanie…")
+    log("   Remux failed → transcoding…")
 
-    # B) TRANSCODE (H.264/AAC) – pewniejsze, ale wolniejsze
-    out_mp4 = numbered_path(out_dir / (src.stem + ".mp4"))  # ponowna kolizja jest możliwa
+    # B) TRANSCODE (H.264/AAC) – more robust, but slower
+    out_mp4 = numbered_path(out_dir / (src.stem + ".mp4"))  # collision can happen again
     trans_cmd = [
         ffmpeg, "-y", "-hide_banner",
         "-i", str(src),
@@ -103,9 +103,9 @@ def convert_one(ffmpeg: str, src: Path, out_root: Path, abort_event: threading.E
         log("   OK (transcode).")
         return out_mp4
     if rc == -9:
-        log("   PRZERWANO.")
+        log("   ABORTED.")
         return None
-    log("   Błąd transkodowania.")
+    log("   Transcoding error.")
     return None
 
 # --------- CLI ---------
@@ -121,12 +121,12 @@ def run_cli(args: list[str]) -> int:
             files.append(Path(a)); i += 1
 
     if not files:
-        print("Użycie: python convert.py <plik1> <plik2> ... [--out D:\\wyniki]")
+        print("Usage: python covert.py <file1> <file2> ... [--out D:\\output]")
         return 2
 
     ffmpeg = which_ffmpeg()
     if not ffmpeg:
-        print("Nie znaleziono ffmpeg. Dodaj go do PATH albo umieść w ./bin/ffmpeg(.exe)")
+        print("FFmpeg not found. Add it to PATH or place it at ./bin/ffmpeg(.exe).")
         return 1
 
     if out_dir is None:
@@ -136,7 +136,7 @@ def run_cli(args: list[str]) -> int:
     ok, fail = 0, 0
     for p in files:
         if not p.exists():
-            print(f"[POMIŃ] Nie ma pliku: {p}")
+            print(f"[SKIP] File not found: {p}")
             continue
         res = convert_one(ffmpeg, p, out_dir, abort_event)
         if res is not None:
@@ -146,7 +146,7 @@ def run_cli(args: list[str]) -> int:
             print(f"[ERR] {p.name}")
             fail += 1
 
-    print(f"Zakończono. Sukces: {ok}, błędy: {fail}.")
+    print(f"Finished. Success: {ok}, errors: {fail}.")
     return 0 if fail == 0 else 3
 
 # --------- GUI ---------
@@ -164,16 +164,16 @@ class App(tk.Tk):
         frm = tk.Frame(self); frm.pack(fill="both", expand=True, padx=10, pady=10)
 
         row1 = tk.Frame(frm); row1.pack(fill="x")
-        tk.Button(row1, text="Wybierz pliki…", command=self.pick_files).pack(side="left")
-        tk.Button(row1, text="Wyczyść listę", command=self.clear_files).pack(side="left", padx=6)
+        tk.Button(row1, text="Select files…", command=self.pick_files).pack(side="left")
+        tk.Button(row1, text="Clear list", command=self.clear_files).pack(side="left", padx=6)
 
         self.files_list = tk.Text(frm, height=8)
         self.files_list.pack(fill="both", expand=False, pady=6)
 
         row2 = tk.Frame(frm); row2.pack(fill="x", pady=4)
-        tk.Label(row2, text="Folder wyjściowy (opcjonalnie):", width=28, anchor="w").pack(side="left")
+        tk.Label(row2, text="Output folder (optional):", width=28, anchor="w").pack(side="left")
         tk.Entry(row2, textvariable=self.out_dir).pack(side="left", fill="x", expand=True, padx=6)
-        tk.Button(row2, text="Wybierz…", command=self.pick_out_dir).pack(side="left")
+        tk.Button(row2, text="Browse…", command=self.pick_out_dir).pack(side="left")
 
         act = tk.Frame(frm); act.pack(fill="x", pady=8)
         self.btn_start = tk.Button(act, text="START", command=self.start)
@@ -187,15 +187,15 @@ class App(tk.Tk):
         pf = tk.Frame(frm); pf.pack(fill="x", pady=4)
         self.pbar = ttk.Progressbar(pf, maximum=100.0)
         self.pbar.pack(fill="x")
-        self.plabel = tk.Label(pf, text="Gotowe.")
+        self.plabel = tk.Label(pf, text="Ready.")
         self.plabel.pack(anchor="w")
 
-        # sprawdź ffmpeg
+        # check ffmpeg
         if not which_ffmpeg():
-            messagebox.showwarning("FFmpeg", "Nie znaleziono ffmpeg.\nDodaj do PATH lub umieść w ./bin/ffmpeg(.exe) obok skryptu.")
+            messagebox.showwarning("FFmpeg", "FFmpeg not found.\nAdd it to PATH or place ./bin/ffmpeg(.exe) next to the script.")
 
     def pick_files(self):
-        files = filedialog.askopenfilenames(title="Wybierz pliki wideo", filetypes=VIDEO_FILTER)
+        files = filedialog.askopenfilenames(title="Select video files", filetypes=VIDEO_FILTER)
         if not files:
             return
         self.files = [Path(p) for p in files]
@@ -208,13 +208,13 @@ class App(tk.Tk):
         self.files_list.delete("1.0", "end")
 
     def pick_out_dir(self):
-        d = filedialog.askdirectory(title="Wybierz folder wyjściowy")
+        d = filedialog.askdirectory(title="Choose output folder")
         if d:
             self.out_dir.set(d)
 
     def start(self):
         if not self.files:
-            messagebox.showwarning("Wejście", "Najpierw wybierz pliki.")
+            messagebox.showwarning("Input", "Please select files first.")
             return
         if self.worker and self.worker.is_alive():
             return
@@ -223,18 +223,18 @@ class App(tk.Tk):
         self.btn_abort.config(state="normal")
         self.log.delete("1.0", "end")
         self.pbar["value"] = 0.0
-        self.plabel.config(text="Start…")
+        self.plabel.config(text="Starting…")
         self.worker = threading.Thread(target=self._run, daemon=True)
         self.worker.start()
 
     def abort(self):
         self.abort_event.set()
-        self.plabel.config(text="Przerywam…")
+        self.plabel.config(text="Aborting…")
 
     def _run(self):
         ffmpeg = which_ffmpeg()
         if not ffmpeg:
-            self._log("Nie znaleziono ffmpeg. Dodaj do PATH albo umieść w ./bin/ffmpeg(.exe)")
+            self._log("FFmpeg not found. Add it to PATH or place it at ./bin/ffmpeg(.exe).")
             self._done()
             return
 
@@ -246,7 +246,7 @@ class App(tk.Tk):
             if self.abort_event.is_set():
                 break
             if not src.exists():
-                self._log(f"[POMIŃ] Brak pliku: {src}")
+                self._log(f"[SKIP] Missing file: {src}")
                 continue
 
             self._log(f"({i}/{total}) {src.name}")
@@ -257,15 +257,15 @@ class App(tk.Tk):
                 self._log(f"  → {res}")
                 ok += 1
             else:
-                self._log("  → BŁĄD")
+                self._log("  → ERROR")
                 fail += 1
 
-            self._progress(100.0 * i / total, f"Przetworzono {i}/{total}")
+            self._progress(100.0 * i / total, f"Processed {i}/{total}")
 
         if self.abort_event.is_set():
-            self._log("=== PRZERWANO ===")
+            self._log("=== ABORTED ===")
         else:
-            self._log(f"Zakończono. Sukces: {ok}, błędy: {fail}.")
+            self._log(f"Finished. Success: {ok}, errors: {fail}.")
         self._done()
 
     def _log(self, msg: str):
@@ -286,9 +286,9 @@ class App(tk.Tk):
             self.btn_start.config(state="normal")
             self.btn_abort.config(state="disabled")
             if self.abort_event.is_set():
-                self.plabel.config(text="Przerwano.")
+                self.plabel.config(text="Aborted.")
             else:
-                self.plabel.config(text="Gotowe.")
+                self.plabel.config(text="Ready.")
         except Exception:
             pass
 

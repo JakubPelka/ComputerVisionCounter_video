@@ -1,4 +1,4 @@
-# cv_video_run.py — events: frame + timecode (mm:ss / h:mm:ss) + clock (dla LIVE)
+# cv_video_run.py — events: frame + timecode (mm:ss / h:mm:ss) + clock (for LIVE)
 from __future__ import annotations
 from pathlib import Path
 import time, re as _re, threading
@@ -105,7 +105,7 @@ def _parse_color(val):
     return None
 
 def _fmt_timecode(sec: float) -> str:
-    """mm:ss lub h:mm:ss jeśli >= 1h."""
+    """mm:ss or h:mm:ss if >= 1 hour."""
     if sec < 0: sec = 0.0
     s = int(round(sec))
     h = s // 3600
@@ -123,8 +123,10 @@ def _make_bytetrack(conf: float, track_buffer: int, match_thresh: float, min_hit
     try:
         params = inspect.signature(sv.ByteTrack.__init__).parameters
     except Exception:
-        try: return sv.ByteTrack()
-        except Exception: return None
+        try:
+            return sv.ByteTrack()
+        except Exception:
+            return None
     kwargs = {}
     if "track_thresh" in params: kwargs["track_thresh"] = max(0.05, min(conf, 0.99))
     if "track_buffer" in params: kwargs["track_buffer"] = int(track_buffer)
@@ -134,8 +136,53 @@ def _make_bytetrack(conf: float, track_buffer: int, match_thresh: float, min_hit
     try:
         return sv.ByteTrack(**kwargs)
     except TypeError:
-        try: return sv.ByteTrack()
-        except Exception: return None
+        try:
+            return sv.ByteTrack()
+        except Exception:
+            return None
+
+def _make_botsort(conf: float, track_buffer: int, match_thresh: float, min_hits: int):
+    if sv is None:
+        return None
+    import inspect
+    cand_names = ["BoTSORT", "BOTSORT", "BoTSort"]
+    BotCls = None
+    for nm in cand_names:
+        BotCls = getattr(sv, nm, None)
+        if BotCls is not None:
+            break
+    if BotCls is None:
+        return None
+    try:
+        params = inspect.signature(BotCls.__init__).parameters
+    except Exception:
+        try:
+            return BotCls()
+        except Exception:
+            return None
+    kwargs = {}
+    if "track_thresh" in params: kwargs["track_thresh"] = max(0.05, min(conf, 0.99))
+    if "track_buffer" in params: kwargs["track_buffer"] = int(track_buffer)
+    if "match_thresh" in params: kwargs["match_thresh"] = float(match_thresh)
+    if "min_hits" in params: kwargs["min_hits"] = int(min_hits)
+    if "mot20" in params: kwargs["mot20"] = False
+    try:
+        return BotCls(**kwargs)
+    except TypeError:
+        try:
+            return BotCls()
+        except Exception:
+            return None
+
+def _make_tracker(kind: str, conf: float, track_buffer: int, match_thresh: float, min_hits: int):
+    k = (kind or "").strip().lower()
+    if k in ("botsort", "bot-sort", "bot", "bts"):
+        tr = _make_botsort(conf, track_buffer, match_thresh, min_hits)
+        if tr is not None:
+            return "BoT-SORT", tr
+        bt = _make_bytetrack(conf, track_buffer, match_thresh, min_hits)
+        return "ByteTrack (fallback)", bt
+    return "ByteTrack", _make_bytetrack(conf, track_buffer, match_thresh, min_hits)
 
 # ---------- Drawing helpers ----------
 def _draw_lines_zones(frame, lines_cfg, zones_cfg, frame_color, frame_thickness):
@@ -181,23 +228,24 @@ def _draw_counts_labels(frame, lines_cfg, line_counts, zones_cfg, zone_counts):
             cv2.putText(frame, s, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,200,255), 2, cv2.LINE_AA)
 
 # ---------- Anchors & events ----------
-def _anchor_from_box(b, mode: str):
-    if mode == "bottom": return 0.5*(b[0]+b[2]), b[3]
+def _anchor_from_box(b, mode: str, ghost_margin: int = 0):
+    if mode == "bottom":
+        return 0.5*(b[0]+b[2]), max(0.0, b[3] - float(ghost_margin))
     return 0.5*(b[0]+b[2]), 0.5*(b[1]+b[3])
 
 def _process_frame_counting(app, frame_idx, fps, names,
                             lines_cfg, zones_cfg,
                             det_boxes, det_confs, det_cids, det_ids,
                             last_anchor, line_states, line_counts, zone_states, zone_counts, events,
-                            line_min_gap, anchor_mode,
+                            line_min_gap, zone_min_gap, anchor_mode, ghost_margin,
                             alert_enabled, alert_classes_set, alert_freq, alert_dur,
                             alert_state, alert_freeze_ms,
                             alert_when_inside,
                             event_time_sec, timecode_str, clock_str):
-    anchors = [_anchor_from_box(b, anchor_mode) for b in det_boxes]
+    anchors = [_anchor_from_box(b, anchor_mode, ghost_margin) for b in det_boxes]
 
     for (tid, b, s, cid, (cx,cy)) in zip(det_ids, det_boxes, det_confs, det_cids, anchors):
-        # Linie: pojedynczy beep przy przekroczeniu
+        # Lines: single beep on crossing
         for li, ln in enumerate(lines_cfg or []):
             a = (ln["a"][0], ln["a"][1]); b2 = (ln["b"][0], ln["b"][1])
             st = line_states[li].get(tid, {"last_side": None, "last_frame": -9999})
@@ -234,12 +282,12 @@ def _process_frame_counting(app, frame_idx, fps, names,
             else:
                 line_states[li][tid] = st
 
-        # Strefy: ciągły beep wg trybu (inside/outside)
+        # Zones: continuous beep according to mode (inside/outside)
         for zi, zn in enumerate(zones_cfg or []):
             sstate = zone_states[zi].get(tid, {"inside": False, "last_change": -9999})
             inside_now = point_in_polygon((cx,cy), zn["pts"])
             if inside_now != sstate["inside"]:
-                if frame_idx - sstate["last_change"] >= line_min_gap:
+                if frame_idx - sstate["last_change"] >= zone_min_gap:
                     sstate["inside"] = inside_now
                     sstate["last_change"] = frame_idx
                     zone_states[zi][tid] = sstate
@@ -261,7 +309,7 @@ def _process_frame_counting(app, frame_idx, fps, names,
             else:
                 zone_states[zi][tid] = sstate
 
-            # Beep ciągły wg trybu
+            # Continuous beep per mode
             if alert_enabled:
                 want_inside = bool(alert_when_inside)  # 1=inside, 0=outside
                 cond = (sstate.get("inside", False) is True) if want_inside else (sstate.get("inside", False) is False)
@@ -294,6 +342,7 @@ def run(app, sources, outp: Path, selected_idx):
         frame_skip = int(p["frame_skip"]); stride = max(1, frame_skip + 1)
         track_buffer = int(p["track_buffer"]); match_thresh = float(p["match_thresh"]); min_hits = int(p["min_hits"])
         line_min_gap = int(p.get("line_min_gap", LINE_MIN_GAP_FRAMES_DEFAULT))
+        zone_min_gap = int(p.get("zone_min_gap", ZONE_MIN_GAP_FRAMES_DEFAULT))
         device = device_auto_str()
 
         names = app.model.names
@@ -301,6 +350,7 @@ def run(app, sources, outp: Path, selected_idx):
         select_names = [id2name[i] for i in selected_idx]
         anchor_mode = getattr(app, "anchor_mode", None).get() if hasattr(app, "anchor_mode") else "bottom"
         overlay_mode = getattr(app, "overlay_mode", None).get() if hasattr(app, "overlay_mode") else "centroid"
+        ghost_margin = int(getattr(app, "ghost_margin", None).get() if hasattr(app, "ghost_margin") else 0)
 
         # TRACE & FRAME (ADVANCED)
         trace_on = getattr(app, "trace_enabled", None).get() if hasattr(app, "trace_enabled") else True
@@ -322,7 +372,9 @@ def run(app, sources, outp: Path, selected_idx):
 
         app._log(f"Param: imgsz={imgsz}, conf={conf}, iou={iou}, frame_skip={frame_skip}, "
                  f"track_buffer={track_buffer}, match={match_thresh}, hits={min_hits}, device={device}")
-        app._log(f"Tracker: bytetrack | Klasy: {', '.join(select_names)} | "
+        tracker_kind = (getattr(app, "tracker_kind", None).get() if hasattr(app, "tracker_kind") else "bytetrack")
+        tracker_name, _tracker_obj_preview = _make_tracker(tracker_kind, conf, track_buffer, match_thresh, min_hits)
+        app._log(f"Tracker: {tracker_name} | Classes: {', '.join(select_names)} | "
                  f"Alert={'ON' if alert_enabled else 'OFF'} ({', '.join(sorted(alert_classes_set)) or '*'}, freeze={alert_freeze_ms}ms, zone_mode={'INSIDE' if alert_when_inside else 'OUTSIDE'})")
 
         for vi, source in enumerate(sources):
@@ -332,7 +384,7 @@ def run(app, sources, outp: Path, selected_idx):
             is_stream = _is_stream_source(source)
             cap = cv2.VideoCapture(source if is_stream or isinstance(source, (int,)) else str(source))
             if not cap or not cap.isOpened():
-                app._log(f"[WARN] Nie można otworzyć: {src_name}")
+                app._log(f"[WARN] Cannot open: {src_name}")
                 continue
 
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if (not is_stream and cap.get(cv2.CAP_PROP_FRAME_COUNT) > 0) else None
@@ -340,11 +392,11 @@ def run(app, sources, outp: Path, selected_idx):
             W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
             H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
 
-            # start „zegarków” dla timecode/clock
+            # start timecode/clock bases
             start_perf = time.perf_counter()
             start_epoch = time.time()
 
-            # --- Edytor liczników ---
+            # --- Counter editor ---
             if is_stream:
                 base_stem = _re.sub(r'[^A-Za-z0-9_]+','_', src_name if isinstance(source, str) else f"cam_{source}")
                 default_cfg_path = cnt_dir / f"{base_stem}.json"
@@ -355,7 +407,7 @@ def run(app, sources, outp: Path, selected_idx):
             else:
                 ok, first_frame = cap.read()
                 if not ok or first_frame is None:
-                    app._log(f"[ERR] Brak pierwszej klatki: {src_name}")
+                    app._log(f"[ERR] No first frame: {src_name}")
                     cap.release(); continue
                 base_stem = (Path(src_name).stem if isinstance(source, (str,Path)) else f"cam_{source}")
                 default_cfg_path = cnt_dir / f"{base_stem}.json"
@@ -364,17 +416,17 @@ def run(app, sources, outp: Path, selected_idx):
                 lines_cfg = editor.lines[:]; zones_cfg = editor.zones[:]
 
             if not lines_cfg and not zones_cfg:
-                app._log("[WARN] Brak linii i stref — pomijam.")
+                app._log("[WARN] No lines or zones — skipping.")
                 cap.release(); continue
 
             # --- Writer ---
             fps_out = max(1.0, fps / float(stride))
             writer, out_path = open_video_writer_collision(vids_dir / f"{base_stem}_annotated.mp4", W, H, fps_out)
             if not writer or not writer.isOpened():
-                app._log(f"[ERR] Nie można otworzyć VideoWriter: {src_name}")
+                app._log(f"[ERR] Cannot open VideoWriter: {src_name}")
                 cap.release(); continue
 
-            tracker = _make_bytetrack(conf, track_buffer, match_thresh, min_hits)
+            tracker_name, tracker = _make_tracker(tracker_kind, conf, track_buffer, match_thresh, min_hits)
 
             last_anchor = {}
             line_states = [{ } for _ in lines_cfg]
@@ -387,7 +439,7 @@ def run(app, sources, outp: Path, selected_idx):
 
             def _frame_timing(is_stream_local: bool) -> tuple[float, str, str]:
                 """
-                Zwraca: (time_sec, timecode_str, clock_str)
+                Returns: (time_sec, timecode_str, clock_str)
                 - LIVE: sec = elapsed(perf), timecode=mm:ss, clock=YYYY-mm-dd HH:MM:SS
                 - FILE: sec = CAP_PROP_POS_MSEC/1000 (fallback: frame_idx/fps), timecode=mm:ss, clock=""
                 """
@@ -401,7 +453,7 @@ def run(app, sources, outp: Path, selected_idx):
                 if pos_ms and pos_ms > 0:
                     sec = float(pos_ms) / 1000.0
                 else:
-                    # fallback: przy frame skip liczymy z indeksu ramki przeliczonego na czas
+                    # fallback: if skipping frames, compute from frame index
                     cur_idx = cap.get(cv2.CAP_PROP_POS_FRAMES)
                     if cur_idx and cur_idx > 0 and fps > 0:
                         sec = float(cur_idx) / float(fps)
@@ -438,23 +490,23 @@ def run(app, sources, outp: Path, selected_idx):
                         det_cids  = cls.astype(int).tolist()
                         det_ids   = list(range(1, len(det_boxes)+1))
 
-                # Timing do zdarzeń (jeden raz na klatkę)
+                # Timing for events (once per frame)
                 sec, tc, clk = _frame_timing(is_stream)
 
-                # Liczenie + alerty
+                # Counting + alerts
                 anchors = _process_frame_counting(
                     app, frame_idx, fps, id2name,
                     lines_cfg, zones_cfg,
                     det_boxes, det_confs, det_cids, det_ids,
                     last_anchor, line_states, line_counts, zone_states, zone_counts, events,
-                    line_min_gap, anchor_mode,
+                    line_min_gap, zone_min_gap, anchor_mode, ghost_margin,
                     alert_enabled, alert_classes_set, alert_freq, alert_dur,
                     alert_state, alert_freeze_ms,
                     alert_when_inside,
                     sec, tc, clk
                 )
 
-                # Ślady
+                # Trails
                 if trails is not None:
                     for tid, a in zip(det_ids, anchors):
                         dq = trails.get(tid)
@@ -465,7 +517,7 @@ def run(app, sources, outp: Path, selected_idx):
 
                 overlay = frame
 
-                # Detekcje
+                # Detections
                 try:
                     draw_detections(overlay, det_boxes, det_confs, det_cids, det_ids,
                                     id2name, (overlay_mode or "centroid"),
@@ -473,7 +525,7 @@ def run(app, sources, outp: Path, selected_idx):
                 except Exception:
                     pass
 
-                # Ramki (linie/strefy) + ślady + napisy liczników
+                # Lines/zones frames + trails + counter labels
                 _draw_lines_zones(overlay, lines_cfg, zones_cfg, frame_color, frame_thickness)
                 _draw_trails(overlay, trails, trace_color, trace_thickness)
                 _draw_counts_labels(overlay, lines_cfg, line_counts, zones_cfg, zone_counts)
@@ -509,10 +561,10 @@ def run(app, sources, outp: Path, selected_idx):
             cap.release()
             writer.release()
 
-            # Zapis zdarzeń + podsumowanie
+            # Save events + summary
             ev_df = pd.DataFrame(events)
             ev_path = save_csv_collision(ev_df, ev_dir / f"{base_stem}_events.csv")
-            app._log(f"Zapisano events: {ev_path}")
+            app._log(f"Saved events: {ev_path}")
 
             summary = {
                 "source": src_name,
@@ -529,12 +581,12 @@ def run(app, sources, outp: Path, selected_idx):
                 }
             }
             sum_path = save_json_collision(summary, summ_dir / f"{base_stem}_summary.json")
-            app._log(f"Zapisano summary: {sum_path}")
+            app._log(f"Saved summary: {sum_path}")
 
-        app._set_progress(100.0, "Gotowe.")
+        app._set_progress(100.0, "Done.")
 
     except Exception as e:
-        try: app._log(f"[BŁĄD] {e}")
+        try: app._log(f"[ERROR] {e}")
         except Exception: print(e)
     finally:
         try:
