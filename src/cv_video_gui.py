@@ -104,6 +104,7 @@ class CounterEditor(tk.Toplevel):
 
         controls = tk.Frame(self); controls.pack(fill="x", pady=6)
         tk.Button(controls, text="Add line", command=lambda: self.set_mode("line")).pack(side="left", padx=4)
+        tk.Button(controls, text="Add polyline", command=lambda: self.set_mode("polyline")).pack(side="left", padx=4)  # NEW    
         tk.Button(controls, text="Add zone", command=lambda: self.set_mode("zone")).pack(side="left", padx=4)
         tk.Button(controls, text="Remove last", command=self.remove_last).pack(side="left", padx=10)
         tk.Button(controls, text="Clear (resume LIVE)", command=self.clear_and_resume).pack(side="left", padx=4)
@@ -178,12 +179,18 @@ class CounterEditor(tk.Toplevel):
     def set_mode(self, m):
         self.mode.set(m)
         self.cur_points = []
-        if m in ("line", "zone") and self.live:
+        if m in ("line", "polyline", "zone") and self.live:
             self._pause_live()
-            self.hint.config(text="PAUSE – draw (Backspace undo, Enter finish). First click = A, second = B.")
+            if m == "line":
+                self.hint.config(text="PAUSE — draw straight line: click A, click B. (Backspace undo)")
+            elif m == "polyline":
+                self.hint.config(text="PAUSE — draw polyline: click points (A…B), Enter to finish. (Backspace undo)")
+            else:
+                self.hint.config(text="PAUSE — draw zone: click points (3+), Enter to finish. (Backspace undo)")
         elif m == "idle":
             self.hint.config(text="Mode: idle" if not self.live else "LIVE")
         self._redraw_overlay_only()
+
 
     def _pause_live(self):
         if self._after_id is not None:
@@ -214,29 +221,45 @@ class CounterEditor(tk.Toplevel):
         if self.mode.get() == "idle":
             return
         if self.live:
-            self._pause_live()  # ensure we draw on a frozen frame
+            self._pause_live()
         xi, yi = self.disp_to_img(e.x, e.y)
+
         if self.mode.get() == "line":
+            # classic 2-click line
             self.cur_points.append([xi, yi])
             if len(self.cur_points) == 2:
                 self.ask_name_and_add_line(self.cur_points[0], self.cur_points[1])
                 self.cur_points = []; self.mode.set("idle")
                 self.hint.config(text="Line added. (Resume LIVE with “Clear (resume LIVE)”)")
-        elif self.mode.get() == "zone":
-            if len(self.cur_points) < 10:
+
+        elif self.mode.get() == "polyline":
+            # any number of points, finish with Enter
+            if len(self.cur_points) < 64:  # sane guard
                 self.cur_points.append([xi, yi])
+
+        elif self.mode.get() == "zone":
+            if len(self.cur_points) < 64:
+                self.cur_points.append([xi, yi])
+
         self._redraw_overlay_only()
+
 
     def on_backspace(self, _):
         if self.cur_points:
             self.cur_points.pop(); self._redraw_overlay_only()
 
     def on_enter(self, _):
-        if self.mode.get() == "zone" and len(self.cur_points) >= 3:
+        if self.mode.get() == "polyline" and len(self.cur_points) >= 2:
+            self.ask_name_and_add_polyline(self.cur_points)
+            self.cur_points = []; self.mode.set("idle")
+            self.hint.config(text="Polyline added. (Resume LIVE with “Clear (resume LIVE)”)")
+            self._redraw_overlay_only()
+        elif self.mode.get() == "zone" and len(self.cur_points) >= 3:
             self.ask_name_and_add_zone(self.cur_points)
             self.cur_points = []; self.mode.set("idle")
             self.hint.config(text="Zone added. (Resume LIVE with “Clear (resume LIVE)”)")
             self._redraw_overlay_only()
+
 
     def ask_name_and_add_line(self, a, b):
         name = self._ask_name("Line name — first click=A, second=B (direction A→B):")
@@ -269,27 +292,47 @@ class CounterEditor(tk.Toplevel):
 
     def _redraw_overlay_only(self):
         self.canvas.delete("overlay")
-        # current points — yellow
-        for i,p in enumerate(self.cur_points):
-            dx,dy = self.img_to_disp(p[0], p[1])
-            self.canvas.create_oval(dx-3, dy-3, dx+3, dy+3, fill="yellow", outline="", tags="overlay")
-            if i>0:
-                px,py = self.img_to_disp(self.cur_points[i-1][0], self.cur_points[i-1][1])
-                self.canvas.create_line(px,py,dx,dy, fill="yellow", width=2, tags="overlay")
-        # lines with A/B markers + arrow A→B
+
+        # current sketch (yellow)
+        if self.cur_points:
+            pts = [self.img_to_disp(p[0], p[1]) for p in self.cur_points]
+            for i, (x, y) in enumerate(pts):
+                self.canvas.create_oval(x-3, y-3, x+3, y+3, fill="yellow", outline="", tags="overlay")
+                if i > 0:
+                    x0, y0 = pts[i-1]
+                    self.canvas.create_line(x0, y0, x, y, fill="yellow", width=2, tags="overlay")
+            if self.mode.get() == "line" and len(pts) == 2:
+                # show temporary (A->B)
+                ax, ay = pts[0]; bx, by = pts[1]
+                self.canvas.create_line(ax, ay, bx, by, fill="#00FFFF", width=3,
+                                        arrow="last", arrowshape=(12,14,6), tags="overlay")
+                self.canvas.create_text((ax+bx)/2, (ay+by)/2 - 12, text="(A->B)", fill="#00FFFF", tags="overlay")
+
+        # saved lines (straight & polyline)
         for ln in self.lines:
-            a = self.img_to_disp(*ln["a"]); b = self.img_to_disp(*ln["b"])
-            # main line with arrow
-            self.canvas.create_line(a[0],a[1],b[0],b[1], fill="#00FFFF", width=3,
-                                    arrow="last", arrowshape=(12,14,6), tags="overlay")
-            # endpoints
-            self.canvas.create_oval(a[0]-3,a[1]-3,a[0]+3,a[1]+3, fill="#00FFFF", outline="", tags="overlay")
-            self.canvas.create_oval(b[0]-3,b[1]-3,b[0]+3,b[1]+3, fill="#00FFFF", outline="", tags="overlay")
-            self.canvas.create_text(a[0]+8, a[1]-8, text="A", fill="#00FFFF", tags="overlay")
-            self.canvas.create_text(b[0]+8, b[1]-8, text="B", fill="#00FFFF", tags="overlay")
-            # label
-            self.canvas.create_text((a[0]+b[0])/2, (a[1]+b[1])/2 - 12, text=f"{ln['name']}  (A->B)", fill="#00FFFF", tags="overlay")
-        # zones
+            col = "#00FFFF"
+            if "pts" in ln and len(ln["pts"]) >= 2:
+                pts = [self.img_to_disp(p[0], p[1]) for p in ln["pts"]]
+                for i in range(1, len(pts)):
+                    x0,y0 = pts[i-1]; x1,y1 = pts[i]
+                    self.canvas.create_line(x0,y0,x1,y1, fill=col, width=3,
+                                            arrow=("last" if i == len(pts)-1 else None),
+                                            arrowshape=(12,14,6) if i == len(pts)-1 else None,
+                                            tags="overlay")
+                ax, ay = pts[0]; bx, by = pts[-1]
+            else:
+                a = self.img_to_disp(*ln["a"]); b = self.img_to_disp(*ln["b"])
+                ax, ay = a; bx, by = b
+                self.canvas.create_line(ax, ay, bx, by, fill=col, width=3,
+                                        arrow="last", arrowshape=(12,14,6), tags="overlay")
+            # endpoints A/B markers + label
+            self.canvas.create_oval(ax-3, ay-3, ax+3, ay+3, fill=col, outline="", tags="overlay")
+            self.canvas.create_oval(bx-3, by-3, bx+3, by+3, fill=col, outline="", tags="overlay")
+            self.canvas.create_text(ax+8, ay-8, text="A", fill=col, tags="overlay")
+            self.canvas.create_text(bx+8, by-8, text="B", fill=col, tags="overlay")
+            self.canvas.create_text((ax+bx)/2, (ay+by)/2 - 12, text=f"{ln['name']}  (A->B)", fill=col, tags="overlay")
+
+        # saved zones
         for zn in self.zones:
             pts = [self.img_to_disp(x,y) for x,y in zn["pts"]]
             for i in range(len(pts)):
@@ -299,6 +342,13 @@ class CounterEditor(tk.Toplevel):
             cy = sum([p[1] for p in zn["pts"]])/len(zn["pts"])
             dcx, dcy = self.img_to_disp(cx, cy)
             self.canvas.create_text(dcx, dcy, text=zn["name"], fill="#FFAA00", tags="overlay")
+
+    def ask_name_and_add_polyline(self, pts):
+        name = self._ask_name("Polyline name — first point = A, last = B (direction A->B):")
+        if not name: return
+        self.lines.append({"name": name, "pts": [[float(x), float(y)] for x, y in pts]})
+
+
 
     def finish(self):
         if self.default_cfg_path:

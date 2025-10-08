@@ -339,6 +339,14 @@ class App(AppUIMixin, tk.Tk):
             try: var.set(not var.get())
             except Exception: pass
 
+    def _preview_suppress(self, ms: int = 2000):
+        """Block preview creation/updates for ms milliseconds (to finish abort cleanly)."""
+        import time
+        self._preview_suppress_until = time.monotonic() + (ms / 1000.0)
+
+    def _preview_is_suppressed(self) -> bool:
+        import time
+        return getattr(self, "_preview_suppress_until", 0.0) > time.monotonic()
 
 
 
@@ -837,8 +845,14 @@ class App(AppUIMixin, tk.Tk):
         Closing the window (X) or pressing ESC == pressing the ABORT button.
         The window is raised and focused so ESC works immediately.
         """
+        if self._preview_is_suppressed():
+            return
+
         def _abort_from_preview(_evt=None):
             try:
+                # prevent re-creation during the next frames/resize events
+                self._preview_suppress(500)
+                self._destroy_preview_window()
                 self.abort()
             except Exception:
                 try:
@@ -877,7 +891,8 @@ class App(AppUIMixin, tk.Tk):
 
         self._preview_win = win
         self._preview_lbl = lbl
-        self._preview_last_bgr = None  # last frame cache for resize redraws
+        self._preview_last_bgr = None
+        self._preview_after_id = None
 
         # Redraw on window resize so scaling follows the window
         win.bind("<Configure>", self._on_preview_resize)
@@ -894,28 +909,23 @@ class App(AppUIMixin, tk.Tk):
         except Exception:
             pass
 
-    def _on_preview_resize(self, _evt=None):
-        """Redraw last frame when the preview window changes size."""
-        try:
-            if getattr(self, "_preview_last_bgr", None) is not None:
-                # Reuse the last frame; _show_preview_bgr will rescale to new size
-                self._show_preview_bgr(self._preview_last_bgr)
-        except Exception:
-            pass
 
 
 
     def _show_preview_bgr(self, frame_bgr):
-        if not self.preview_enabled.get():
+        if not self.preview_enabled.get() or self._preview_is_suppressed():
             return
 
         def _do():
             try:
-                self._ensure_preview_window()
-                win = getattr(self, "_preview_win", None)
-                lbl = getattr(self, "_preview_lbl", None)
-                if not (win and lbl and win.winfo_exists()):
-                    return
+                # Only update if the window exists; do NOT auto-create while suppressed
+                if not (getattr(self, "_preview_win", None) and self._preview_win.winfo_exists()):
+                    self._ensure_preview_window()
+                    if not (getattr(self, "_preview_win", None) and self._preview_win.winfo_exists()):
+                        return
+
+                win = self._preview_win
+                lbl = self._preview_lbl
 
                 # Cache last frame so we can redraw on window resize
                 self._preview_last_bgr = frame_bgr
@@ -928,7 +938,6 @@ class App(AppUIMixin, tk.Tk):
                 target_h = int(th * 0.90)
 
                 H, W = frame_bgr.shape[:2]
-                # Allow UPSCALING (important for 4K videos in a large window)
                 scale = min(target_w / float(W), target_h / float(H))
                 nw = max(1, int(W * scale))
                 nh = max(1, int(H * scale))
@@ -945,20 +954,51 @@ class App(AppUIMixin, tk.Tk):
                 pass
 
         try:
-            self.after(0, _do)
+            # keep only one pending update; cancel older one if any
+            if getattr(self, "_preview_after_id", None):
+                try: self.after_cancel(self._preview_after_id)
+                except Exception: pass
+                self._preview_after_id = None
+            self._preview_after_id = self.after(0, _do)
+        except Exception:
+            pass
+
+
+
+    def _on_preview_resize(self, _evt=None):
+        """Redraw last frame when the preview window changes size."""
+        try:
+            if self._preview_is_suppressed():
+                return
+            if getattr(self, "_preview_last_bgr", None) is not None and \
+               getattr(self, "_preview_win", None) and self._preview_win.winfo_exists():
+                # Reuse the last frame; _show_preview_bgr will rescale to new size
+                self._show_preview_bgr(self._preview_last_bgr)
         except Exception:
             pass
 
 
     def _destroy_preview_window(self):
+        """Cancel timers, unbind, and destroy preview window safely."""
         try:
-            if self._preview_win and self._preview_win.winfo_exists():
-                self._preview_win.destroy()
-        except Exception:
-            pass
-        self._preview_win = None
-        self._preview_lbl = None
-        self._preview_imgtk = None
+            if getattr(self, "_preview_after_id", None):
+                try: self.after_cancel(self._preview_after_id)
+                except Exception: pass
+                self._preview_after_id = None
+
+            win = getattr(self, "_preview_win", None)
+            if win:
+                try: win.unbind("<Configure>")
+                except Exception: pass
+                try:
+                    if win.winfo_exists():
+                        win.destroy()
+                except Exception:
+                    pass
+        finally:
+            self._preview_win = None
+            self._preview_lbl = None
+            self._preview_last_bgr = None
 
 
 # ---- robust entrypoint with on-screen + file logging of startup errors ----

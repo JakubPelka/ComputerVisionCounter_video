@@ -23,6 +23,49 @@ except Exception:
 def line_side(a, b, p):
     ax, ay = a; bx, by = b; px, py = p
     return (bx-ax)*(py-ay) - (by-ay)*(px-ax)
+    
+
+def _get_line_pts(ln: dict):
+    """Return a list of points [(x,y),...] for a line (straight or polyline)."""
+    if "pts" in ln and len(ln["pts"]) >= 2:
+        return [(float(x), float(y)) for x, y in ln["pts"]]
+    return [(float(ln["a"][0]), float(ln["a"][1])), (float(ln["b"][0]), float(ln["b"][1]))]
+
+def _point_to_segment_dist2(a, b, p):
+    """Squared distance from point p to segment a-b."""
+    ax, ay = a; bx, by = b; px, py = p
+    vx, vy = bx-ax, by-ay
+    wx, wy = px-ax, py-ay
+    vv = vx*vx + vy*vy
+    t = 0.0 if vv == 0 else max(0.0, min(1.0, (wx*vx + wy*vy)/vv))
+    cx, cy = ax + t*vx, ay + t*vy
+    dx, dy = px-cx, py-cy
+    return dx*dx + dy*dy
+
+def _polyline_side(pts, p):
+    """Signed side using the *nearest* segment of the polyline to point p."""
+    best_i = 0; best_d = 1e30
+    for i in range(len(pts)-1):
+        d2 = _point_to_segment_dist2(pts[i], pts[i+1], p)
+        if d2 < best_d:
+            best_d = d2; best_i = i
+    a, b = pts[best_i], pts[best_i+1]
+    return line_side(a, b, p)
+
+def _polyline_cross_direction(prev_p, cur_p, pts):
+    """
+    If the motion segment prev_p->cur_p intersects ANY polyline segment,
+    return 'ab' or 'ba' using that segment's orientation; otherwise None.
+    """
+    for i in range(len(pts)-1):
+        a, b = pts[i], pts[i+1]
+        if segments_intersect(prev_p, cur_p, a, b):
+            ps = line_side(a, b, prev_p)
+            cs = line_side(a, b, cur_p)
+            if ps < 0 and cs > 0: return "ab"
+            if ps > 0 and cs < 0: return "ba"
+    return None
+
 
 def segments_intersect(p1, p2, q1, q2):
     def _orient(a,b,c):
@@ -376,24 +419,34 @@ def _draw_lines_zones(frame, lines_cfg, zones_cfg, frame_color, frame_thickness)
     th = int(frame_thickness if frame_thickness is not None else 2)
     if th <= 0:
         return
-    # Lines: arrow A->B + endpoint markers
-    for ln in (lines_cfg or []):
-        a = tuple(map(int, ln["a"])); b = tuple(map(int, ln["b"]))
-        col = frame_color if frame_color is not None else (0, 165, 255)
-        try:
-            cv2.arrowedLine(frame, a, b, col, max(1, th), tipLength=0.08)
-        except Exception:
-            cv2.line(frame, a, b, col, th, cv2.LINE_AA)
-        cv2.circle(frame, a, 4, col, -1, lineType=cv2.LINE_AA)
-        cv2.circle(frame, b, 4, col, -1, lineType=cv2.LINE_AA)
-        cv2.putText(frame, "A", (a[0] + 6, a[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
-        cv2.putText(frame, "B", (b[0] + 6, b[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
 
-    # Zones outline
+    # Lines (straight & polylines)
+    for ln in (lines_cfg or []):
+        pts = _get_line_pts(ln)
+        col = frame_color if frame_color is not None else (0,165,255)
+        if len(pts) >= 2:
+            for i in range(1, len(pts)):
+                a = (int(pts[i-1][0]), int(pts[i-1][1]))
+                b = (int(pts[i][0]),   int(pts[i][1]))
+                if i == len(pts)-1:
+                    try:
+                        cv2.arrowedLine(frame, a, b, col, max(1, th), tipLength=0.08)
+                    except Exception:
+                        cv2.line(frame, a, b, col, th, cv2.LINE_AA)
+                else:
+                    cv2.line(frame, a, b, col, th, cv2.LINE_AA)
+            # A/B markers
+            a0 = (int(pts[0][0]), int(pts[0][1])); b0 = (int(pts[-1][0]), int(pts[-1][1]))
+            cv2.circle(frame, a0, 4, col, -1, lineType=cv2.LINE_AA)
+            cv2.circle(frame, b0, 4, col, -1, lineType=cv2.LINE_AA)
+            cv2.putText(frame, "A", (a0[0]+6, a0[1]-6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
+            cv2.putText(frame, "B", (b0[0]+6, b0[1]-6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
+
+    # Zones
     for zn in (zones_cfg or []):
         pts = np.array(zn["pts"], dtype=np.int32)
         if len(pts) >= 3:
-            col = frame_color if frame_color is not None else (0, 165, 255)
+            col = frame_color if frame_color is not None else (0,165,255)
             cv2.polylines(frame, [pts], True, col, th, cv2.LINE_AA)
 
 
@@ -567,19 +620,34 @@ def _process_frame_counting(app, frame_idx, fps, names,
 
     for (tid, b, s, cid, (cx,cy)) in zip(det_ids, det_boxes, det_confs, det_cids, anchors):
         # Lines: one-shot sound on crossing
+        # Lines: single beep when crossing (straight or polyline)
         for li, ln in enumerate(lines_cfg or []):
-            a = (ln["a"][0], ln["a"][1]); b2 = (ln["b"][0], ln["b"][1])
             st = line_states[li].get(tid, {"last_side": None, "last_frame": -9999})
-            prev_side = st["last_side"]; cur_side = line_side(a, b2, (cx,cy))
+            prev_c = last_anchor.get(tid, (cx,cy))
             crossed = False; direction = None
-            if prev_side is not None:
-                prev_c = last_anchor.get(tid, (cx,cy))
-                if segments_intersect(prev_c, (cx,cy), a, b2):
-                    if prev_side < 0 and cur_side > 0: direction = "ab"
-                    elif prev_side > 0 and cur_side < 0: direction = "ba"
+
+            if "pts" in ln and len(ln["pts"]) >= 2:
+                pts_line = _get_line_pts(ln)
+                if st["last_side"] is None:
+                    st["last_side"] = _polyline_side(pts_line, (cx,cy))
+                else:
+                    direction = _polyline_cross_direction(prev_c, (cx,cy), pts_line)
                     if direction is not None and (frame_idx - st["last_frame"] >= line_min_gap):
                         crossed = True
-            st["last_side"] = cur_side
+                # keep last_side updated (so next frame isn't None)
+                st["last_side"] = _polyline_side(pts_line, (cx,cy))
+            else:
+                a = (ln["a"][0], ln["a"][1]); b2 = (ln["b"][0], ln["b"][1])
+                cur_side = line_side(a, b2, (cx,cy))
+                prev_side = st["last_side"]
+                if prev_side is not None:
+                    if segments_intersect(prev_c, (cx,cy), a, b2):
+                        if prev_side < 0 and cur_side > 0: direction = "ab"
+                        elif prev_side > 0 and cur_side < 0: direction = "ba"
+                        if direction is not None and (frame_idx - st["last_frame"] >= line_min_gap):
+                            crossed = True
+                st["last_side"] = cur_side
+
             if crossed:
                 st["last_frame"] = frame_idx
                 line_states[li][tid] = st
@@ -596,14 +664,13 @@ def _process_frame_counting(app, frame_idx, fps, names,
                     "counter_name": ln["name"],
                     "conf": float(s)
                 })
-                if alert_enabled and (cid in selected_class_ids_set) and sound_player:
-                    if now_ms - app._alert_state.get("last_ms", 0) >= int(alert_freeze_ms):
-                        sound_player.play_once()
-                        app._alert_state["last_ms"] = now_ms
-                        try: app._log(f"[ALERT] ping (line {direction}) {names[cid]} at {timecode_str}")
-                        except Exception: pass
+                if alert_enabled:
+                    cname = (names[cid] if isinstance(names, dict) else names[cid]).lower()
+                    if (not alert_classes_set) or (cname in alert_classes_set):
+                        _beep(alert_freq, alert_dur)
             else:
                 line_states[li][tid] = st
+
 
         # Zones: active while inside/outside (depending on mode)
         for zi, zn in enumerate(zones_cfg or []):
