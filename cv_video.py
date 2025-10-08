@@ -7,7 +7,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from cv_video_gui import ScrollableFrame, CounterEditor, AppUIMixin  # GUI utils
-from cv_video_run import run as core_run
+from cv_video_run import run as core_run, SoundPlayer               # ⟵ added SoundPlayer import
 from cv_video_core import (
     ensure_dir,
     score_weight_name, find_best_weights, resolve_weights_to_pt,
@@ -203,6 +203,31 @@ class App(AppUIMixin, tk.Tk):
         # build UI
         self.build_ui_compact()
         self._autoload_best_model()
+
+    # small helper for test sound
+    def _play_test_sound(self, path: str | None):
+        """Play selected alert sound once (non-blocking)."""
+        try:
+            p = (path or "").strip()
+            if not p:
+                messagebox.showinfo("Alert sound", "Pick a sound file first.")
+                return
+            if not Path(p).exists():
+                messagebox.showerror("Alert sound", f"File not found:\n{p}")
+                return
+            sp = SoundPlayer(p)
+            # stop any previous test loops (safe no-op if none)
+            try:
+                sp.stop()
+            except Exception:
+                pass
+            sp.play_once()
+            self._log(f"[TEST] {Path(p).name} — backends: {sp.describe_backends()}")
+        except Exception as e:
+            try:
+                messagebox.showerror("Alert sound", str(e))
+            except Exception:
+                pass
 
     # ========== UI (compact version) ==========
     def build_ui_compact(self):
@@ -584,6 +609,8 @@ class App(AppUIMixin, tk.Tk):
                                                filetypes=[("Audio","*.wav *.mp3 *.ogg *.flac *.m4a"), ("All","*.*")])
             if fpath: v_a_sound.set(fpath)
         tk.Button(r2, text="Browse…", command=_pick_sound).pack(side="left")
+        # ▶ Test sound button — plays the currently selected file once
+        tk.Button(r2, text="Test sound ▶", command=lambda: self._play_test_sound(v_a_sound.get())).pack(side="left", padx=(8,0))
 
         r3 = tk.Frame(frame_alert); r3.pack(fill="x", padx=6, pady=2)
         cb_loop = tk.Checkbutton(r3, text="Loop while active", variable=v_a_loop); cb_loop.pack(side="left", padx=(0,12)); attach_help(cb_loop, "alert_loop")
