@@ -376,10 +376,9 @@ def _draw_lines_zones(frame, lines_cfg, zones_cfg, frame_color, frame_thickness)
     th = int(frame_thickness if frame_thickness is not None else 2)
     if th <= 0:
         return
-    # Lines: arrow A->B + endpoint labels
+    # Lines: arrow A->B + endpoint markers
     for ln in (lines_cfg or []):
-        a = tuple(map(int, ln["a"]))
-        b = tuple(map(int, ln["b"]))
+        a = tuple(map(int, ln["a"])); b = tuple(map(int, ln["b"]))
         col = frame_color if frame_color is not None else (0, 165, 255)
         try:
             cv2.arrowedLine(frame, a, b, col, max(1, th), tipLength=0.08)
@@ -390,12 +389,13 @@ def _draw_lines_zones(frame, lines_cfg, zones_cfg, frame_color, frame_thickness)
         cv2.putText(frame, "A", (a[0] + 6, a[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
         cv2.putText(frame, "B", (b[0] + 6, b[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
 
-    # Zones
+    # Zones outline
     for zn in (zones_cfg or []):
         pts = np.array(zn["pts"], dtype=np.int32)
         if len(pts) >= 3:
             col = frame_color if frame_color is not None else (0, 165, 255)
             cv2.polylines(frame, [pts], True, col, th, cv2.LINE_AA)
+
 
 
 def _draw_trails(frame, trails, trace_color, trace_thickness):
@@ -416,27 +416,70 @@ def _draw_trails(frame, trails, trace_color, trace_thickness):
 
 def _ab_dir_hint_for_line(ln: dict) -> str:
     """
-    Human hint for what A->B means on screen, using the same cross-product
-    as the counter (see line_side).
-    Vertical-ish lines: Left->Right / Right->Left
-    Horizontal-ish lines: Up->Down / Down->Up
+    Human hint for what A->B means (uses the same cross-product sign as the counter).
+    Vertical-ish: Left->Right / Right->Left. Horizontal-ish: Up->Down / Down->Up.
     """
     ax, ay = ln["a"]; bx, by = ln["b"]
     dx, dy = bx - ax, by - ay
     mx, my = (ax + bx) * 0.5, (ay + by) * 0.5
 
     def s(px, py):
-        # same formula as line_side(a,b,p)
+        # same as line_side(a,b,p): (bx-ax)*(py-ay) - (by-ay)*(px-ax)
         return (bx - ax) * (py - ay) - (by - ay) * (px - ax)
 
-    if abs(dx) < abs(dy):  # vertical-ish -> use Left/Right
-        sl = s(mx - 10, my)  # left of the line
-        sr = s(mx + 10, my)  # right of the line
+    if abs(dx) < abs(dy):               # vertical-ish -> Left/Right
+        sl = s(mx - 10, my)             # left of the line
+        sr = s(mx + 10, my)             # right of the line
         return "Left->Right" if sl < sr else "Right->Left"
-    else:                   # horizontal-ish -> use Up/Down
-        su = s(mx, my - 10)  # above (smaller y)
-        sd = s(mx, my + 10)  # below (larger y)
+    else:                                # horizontal-ish -> Up/Down
+        su = s(mx, my - 10)             # above (smaller y)
+        sd = s(mx, my + 10)             # below (larger y)
         return "Up->Down" if su < sd else "Down->Up"
+
+
+def _draw_hud_panel(
+    img,
+    lines: list[str],
+    anchor: str = "br",  # "tl" | "tr" | "bl" | "br"
+    margin: int = 12,
+    pad: int = 8,
+    font = cv2.FONT_HERSHEY_SIMPLEX,
+    scale: float = 0.6,
+    color = (255, 255, 255),
+    bgcolor = (0, 0, 0),
+    alpha: float = 0.55,
+    thickness: int = 2,
+):
+    """Draw a semi-transparent black box with text lines."""
+    if not lines:
+        return
+    sizes = [cv2.getTextSize(t, font, scale, thickness)[0] for t in lines]
+    maxw = max((w for (w, h) in sizes), default=0)
+    lineh = max((h for (w, h) in sizes), default=14)
+    panel_w = maxw + 2 * pad
+    panel_h = len(lines) * (lineh + 6) - 6 + 2 * pad  # 6 px spacing
+
+    H, W = img.shape[:2]
+    if anchor == "tl":
+        x0, y0 = margin, margin
+    elif anchor == "tr":
+        x0, y0 = W - margin - panel_w, margin
+    elif anchor == "bl":
+        x0, y0 = margin, H - margin - panel_h
+    else:  # "br"
+        x0, y0 = W - margin - panel_w, H - margin - panel_h
+
+    # background (semi-transparent)
+    ov = img.copy()
+    cv2.rectangle(ov, (x0, y0), (x0 + panel_w, y0 + panel_h), bgcolor, -1)
+    cv2.addWeighted(ov, alpha, img, 1 - alpha, 0, img)
+
+    # text
+    y = y0 + pad + lineh
+    for t in lines:
+        cv2.putText(img, t, (x0 + pad, y), font, scale, color, thickness, cv2.LINE_AA)
+        y += lineh + 6
+
 
 
 
@@ -446,19 +489,60 @@ def _ab_dir_hint_for_line(ln: dict) -> str:
 
 
 def _draw_counts_labels(frame, lines_cfg, line_counts, zones_cfg, zone_counts):
+    """
+    Draw a compact HUD with results in the **bottom-right** on a black background.
+    Uses ASCII-only text (A->B). No transparency (solid black) to maximize legibility.
+    """
+    # 1) Build text lines
+    hud_lines = []
     for i, ln in enumerate(lines_cfg or []):
-        ax, ay = ln["a"]; bx, by = ln["b"]
-        cx = int((ax + bx) / 2); cy = int((ay + by) / 2)
-        hint = _ab_dir_hint_for_line(ln)
-        s = f"{ln['name']}  A->B:{line_counts[i]['ab']} ({hint})  B->A:{line_counts[i]['ba']}"
-        cv2.putText(frame, s, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2, cv2.LINE_AA)
+        ab = int(line_counts[i].get("ab", 0))
+        ba = int(line_counts[i].get("ba", 0))
+        # small human hint for A->B direction
+        try:
+            hint = _ab_dir_hint_for_line(ln)
+        except Exception:
+            hint = ""
+        suffix = f"  ({hint})" if hint else ""
+        hud_lines.append(f"{ln['name']}:  A->B {ab}  |  B->A {ba}{suffix}")
 
     for i, zn in enumerate(zones_cfg or []):
-        pts = np.array(zn["pts"], dtype=np.int32)
-        if len(pts) >= 3:
-            cx = int(np.mean(pts[:, 0])); cy = int(np.mean(pts[:, 1]))
-            s = f"{zn['name']}  IN:{zone_counts[i]['in']} OUT:{zone_counts[i]['out']}"
-            cv2.putText(frame, s, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2, cv2.LINE_AA)
+        zin  = int(zone_counts[i].get("in", 0))
+        zout = int(zone_counts[i].get("out", 0))
+        hud_lines.append(f"{zn['name']}:  IN {zin}  |  OUT {zout}")
+
+    if not hud_lines:
+        return  # nothing to draw
+
+    # 2) Layout (bottom-right)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 1
+    th    = 2
+    color = (255, 255, 255)   # white text
+    margin = 12
+    pad    = 8
+    line_gap = 6
+
+    # Measure panel size
+    sizes = [cv2.getTextSize(t, font, scale, th)[0] for t in hud_lines]
+    maxw  = max(w for w, h in sizes)
+    lineh = max(h for w, h in sizes)
+    panel_w = maxw + 2 * pad
+    panel_h = len(hud_lines) * (lineh + line_gap) - line_gap + 2 * pad
+
+    H, W = frame.shape[:2]
+    x0 = max(0, W - margin - panel_w)
+    y0 = max(0, H - margin - panel_h)
+
+    # 3) Solid black background for readability
+    cv2.rectangle(frame, (x0, y0), (x0 + panel_w, y0 + panel_h), (0, 0, 0), -1)
+
+    # 4) Draw text lines
+    y = y0 + pad + lineh
+    for t in hud_lines:
+        cv2.putText(frame, t, (x0 + pad, y), font, scale, color, th, cv2.LINE_AA)
+        y += lineh + line_gap
+
 
 
 

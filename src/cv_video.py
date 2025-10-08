@@ -833,12 +833,11 @@ class App(AppUIMixin, tk.Tk):
         # Create new window
         win = tk.Toplevel(self)
         win.title("Preview (LIVE)")
-        win.geometry("860x520")
+        win.geometry("960x620")
 
         # Close (X) or Esc -> ABORT
         win.protocol("WM_DELETE_WINDOW", _abort_from_preview)
         win.bind("<Escape>", _abort_from_preview)
-        # (optional convenience)
         win.bind("<Control-w>", _abort_from_preview)
 
         lbl = tk.Label(win, anchor="center", bg="#111")
@@ -846,6 +845,10 @@ class App(AppUIMixin, tk.Tk):
 
         self._preview_win = win
         self._preview_lbl = lbl
+        self._preview_last_bgr = None  # last frame cache for resize redraws
+
+        # Redraw on window resize so scaling follows the window
+        win.bind("<Configure>", self._on_preview_resize)
 
         # Raise & focus so Esc works right away
         try:
@@ -859,31 +862,61 @@ class App(AppUIMixin, tk.Tk):
         except Exception:
             pass
 
+    def _on_preview_resize(self, _evt=None):
+        """Redraw last frame when the preview window changes size."""
+        try:
+            if getattr(self, "_preview_last_bgr", None) is not None:
+                # Reuse the last frame; _show_preview_bgr will rescale to new size
+                self._show_preview_bgr(self._preview_last_bgr)
+        except Exception:
+            pass
+
 
 
     def _show_preview_bgr(self, frame_bgr):
         if not self.preview_enabled.get():
             return
+
         def _do():
             try:
                 self._ensure_preview_window()
-                frame = frame_bgr
-                h, w = frame.shape[:2]
-                maxw = 840
-                if w > maxw:
-                    r = maxw / w
-                    frame = cv2.resize(frame, (int(maxw), int(h*r)))
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(rgb)
-                imgtk = ImageTk.PhotoImage(image=img)
-                self._preview_imgtk = imgtk
-                self._preview_lbl.config(image=imgtk)
+                win = getattr(self, "_preview_win", None)
+                lbl = getattr(self, "_preview_lbl", None)
+                if not (win and lbl and win.winfo_exists()):
+                    return
+
+                # Cache last frame so we can redraw on window resize
+                self._preview_last_bgr = frame_bgr
+
+                # Target area: ~90% of current window client size (keep aspect ratio)
+                win.update_idletasks()
+                tw = max(100, win.winfo_width()  - 12)
+                th = max(100, win.winfo_height() - 12)
+                target_w = int(tw * 0.90)
+                target_h = int(th * 0.90)
+
+                H, W = frame_bgr.shape[:2]
+                # Allow UPSCALING (important for 4K videos in a large window)
+                scale = min(target_w / float(W), target_h / float(H))
+                nw = max(1, int(W * scale))
+                nh = max(1, int(H * scale))
+
+                interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+                disp = cv2.resize(frame_bgr, (nw, nh), interpolation=interp)
+                rgb  = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+
+                from PIL import Image, ImageTk
+                imgtk = ImageTk.PhotoImage(Image.fromarray(rgb))
+                self._preview_imgtk = imgtk  # keep reference
+                lbl.config(image=imgtk)
             except Exception:
                 pass
+
         try:
             self.after(0, _do)
         except Exception:
             pass
+
 
     def _destroy_preview_window(self):
         try:
