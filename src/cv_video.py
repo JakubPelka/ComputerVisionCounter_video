@@ -798,18 +798,68 @@ class App(AppUIMixin, tk.Tk):
         m = int(remain // 60); s = int(remain % 60)
         return f"{m:02d}:{s:02d}"
 
+
     # ========== PREVIEW window ==========
     def _ensure_preview_window(self):
-        if self._preview_win and (self._preview_win.winfo_exists()):
+        """Create/activate the LIVE preview window.
+        Closing the window (X) or pressing ESC == pressing the ABORT button.
+        The window is raised and focused so ESC works immediately.
+        """
+        def _abort_from_preview(_evt=None):
+            try:
+                self.abort()
+            except Exception:
+                try:
+                    self._destroy_preview_window()
+                except Exception:
+                    pass
+
+        # If it already exists, just raise & focus it
+        if getattr(self, "_preview_win", None) and self._preview_win.winfo_exists():
+            try:
+                w = self._preview_win
+                w.deiconify()
+                w.lift()
+                w.focus_force()
+                if getattr(self, "_preview_lbl", None):
+                    self._preview_lbl.focus_set()
+                # bring-to-front bump without staying always-on-top
+                w.attributes("-topmost", True)
+                w.after(250, lambda: w.attributes("-topmost", False))
+            except Exception:
+                pass
             return
+
+        # Create new window
         win = tk.Toplevel(self)
-        win.title(f"Preview (LIVE) — {APP_NAME}")
+        win.title("Preview (LIVE)")
         win.geometry("860x520")
-        win.protocol("WM_DELETE_WINDOW", lambda: self._destroy_preview_window())
+
+        # Close (X) or Esc -> ABORT
+        win.protocol("WM_DELETE_WINDOW", _abort_from_preview)
+        win.bind("<Escape>", _abort_from_preview)
+        # (optional convenience)
+        win.bind("<Control-w>", _abort_from_preview)
+
         lbl = tk.Label(win, anchor="center", bg="#111")
         lbl.pack(fill="both", expand=True)
+
         self._preview_win = win
         self._preview_lbl = lbl
+
+        # Raise & focus so Esc works right away
+        try:
+            win.update_idletasks()
+            win.deiconify()
+            win.lift()
+            win.focus_force()
+            lbl.focus_set()
+            win.attributes("-topmost", True)
+            win.after(250, lambda: win.attributes("-topmost", False))
+        except Exception:
+            pass
+
+
 
     def _show_preview_bgr(self, frame_bgr):
         if not self.preview_enabled.get():
