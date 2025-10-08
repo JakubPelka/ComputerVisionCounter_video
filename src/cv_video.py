@@ -276,11 +276,23 @@ class App(AppUIMixin, tk.Tk):
         tk.Radiobutton(tr, text="ByteTrack", variable=self.tracker_kind, value="bytetrack").pack(side="left", padx=6)
         tk.Radiobutton(tr, text="BoT-SORT", variable=self.tracker_kind, value="botsort").pack(side="left", padx=6)
 
-        # Class selection
-        lf = tk.LabelFrame(root, text="Class selection (after loading weights)"); lf.pack(fill="both", expand=True, pady=4)
+        # Class selection — scrollable + dynamic columns + TOGGLE strip
+        lf = tk.LabelFrame(root, text="Class selection (after loading weights)")
+        lf.pack(fill="both", expand=True, pady=4)
+
+        # Toggle row (same layout as CvC_images)
+        tog = tk.Frame(lf); tog.pack(fill="x", pady=(4, 0))
+        tk.Label(tog, text="Toggle:").pack(side="left")
+        tk.Button(tog, text="All",   width=6, command=self._toggle_all_classes).pack(side="left", padx=(6, 0))
+        tk.Button(tog, text="None",  width=6, command=self._toggle_none_classes).pack(side="left", padx=(6, 0))
+        tk.Button(tog, text="Invert",width=6, command=self._toggle_invert_classes).pack(side="left", padx=(6, 0))
+
+        # Scroll area for checkboxes (unchanged)
         self.classes_scroll = ScrollableFrame(lf, height=220)
         self.classes_scroll.pack(fill="both", expand=True)
+        # react to real canvas resize (keeps the nice grid)
         self.classes_scroll.canvas.bind("<Configure>", self._on_classes_canvas_config)
+
 
         # Controls + Progress
         bf = tk.Frame(root); bf.pack(fill="x", pady=6)
@@ -310,6 +322,26 @@ class App(AppUIMixin, tk.Tk):
         self.preset_label.config(text=(f"imgsz={p['imgsz']}  conf={p['conf']}  iou={p['iou']}  "
                                        f"skip={p['frame_skip']}  buf={p['track_buffer']}  "
                                        f"match={p['match_thresh']}  hits={p['min_hits']}"))
+
+
+    def _toggle_all_classes(self):
+        for _nm, var, _idx in getattr(self, "class_vars", []):
+            try: var.set(True)
+            except Exception: pass
+
+    def _toggle_none_classes(self):
+        for _nm, var, _idx in getattr(self, "class_vars", []):
+            try: var.set(False)
+            except Exception: pass
+
+    def _toggle_invert_classes(self):
+        for _nm, var, _idx in getattr(self, "class_vars", []):
+            try: var.set(not var.get())
+            except Exception: pass
+
+
+
+
 
     # ========== model loading logic ==========
     def browse_input(self):

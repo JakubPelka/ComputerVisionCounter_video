@@ -397,9 +397,19 @@ class AppUIMixin:
         tk.Radiobutton(tr, text="ByteTrack", variable=self.tracker_kind, value="bytetrack").pack(side="left", padx=6)
         tk.Radiobutton(tr, text="BoT-SORT",  variable=self.tracker_kind, value="botsort").pack(side="left", padx=6)
 
-        # Class list
-        lf = tk.LabelFrame(frm, text="Class selection (after loading weights)"); lf.pack(fill="both", expand=True, pady=4)
-        self.classes_scroll = ScrollableFrame(lf); self.classes_scroll.pack(fill="both", expand=True)
+        # Class list + TOGGLE strip (CvC_images style)
+        lf = tk.LabelFrame(frm, text="Class selection (after loading weights)")
+        lf.pack(fill="both", expand=True, pady=4)
+
+        tog = tk.Frame(lf); tog.pack(fill="x", pady=(4, 0))
+        tk.Label(tog, text="Toggle:").pack(side="left")
+        tk.Button(tog, text="All",   width=6, command=self._toggle_all_classes).pack(side="left", padx=(6, 0))
+        tk.Button(tog, text="None",  width=6, command=self._toggle_none_classes).pack(side="left", padx=(6, 0))
+        tk.Button(tog, text="Invert",width=6, command=self._toggle_invert_classes).pack(side="left", padx=(6, 0))
+
+        self.classes_scroll = ScrollableFrame(lf)
+        self.classes_scroll.pack(fill="both", expand=True)
+
 
         # Controls + progress
         bf = tk.Frame(frm); bf.pack(fill="x", pady=6)
