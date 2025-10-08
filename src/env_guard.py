@@ -7,8 +7,7 @@ from __future__ import annotations
 import os, sys, importlib
 from pathlib import Path
 from dataclasses import dataclass
-
-PKGS = Path(__file__).resolve().parent / "_pkgs"
+from paths import PKGS  # ⟵ bierze root/_pkgs
 
 @dataclass
 class EnvInfo:

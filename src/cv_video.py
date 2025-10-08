@@ -27,12 +27,10 @@ except Exception as e:
     print("Ultralytics check:", e, file=sys.stderr)
 
 # ---------- Branding & default paths ----------
+from paths import REPO_ROOT, INPUTS as DEFAULT_IN_DIR, OUTPUTS as DEFAULT_OUT_DIR, MODELS as DEFAULT_MODELS_DIR, SOUNDS as DEFAULT_SOUNDS_DIR  # ⟵ nowość
+
 APP_NAME = "ComputerVisionCounter VIDEO"
-PROJECT_ROOT = Path(__file__).parent.resolve()
-DEFAULT_IN_DIR = PROJECT_ROOT / "indata"
-DEFAULT_OUT_DIR = ensure_dir(PROJECT_ROOT / "output")          # auto-create on import
-DEFAULT_MODELS_DIR = PROJECT_ROOT / MODEL_DIRNAME
-DEFAULT_SOUNDS_DIR = ensure_dir(PROJECT_ROOT / "sounds")       # auto-create; used for sound browser
+PROJECT_ROOT = REPO_ROOT
 
 # -------------------- Context help (right panel) --------------------
 ADV_HELP_INTRO = (
@@ -852,7 +850,8 @@ class App(AppUIMixin, tk.Tk):
 def _safe_main():
     import traceback, tkinter as _tk
     from pathlib import Path as _P
-    log_dir = _P(__file__).parent / "output"
+    from paths import OUTPUTS as _LOG_DIR   # dodaj u góry funkcji lub modułu
+    log_dir = _LOG_DIR
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
     except Exception:

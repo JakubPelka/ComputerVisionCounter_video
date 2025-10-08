@@ -17,40 +17,14 @@ def draw_detections(frame_bgr,
                     anchor_points=None):
     """
     Draw detection overlays.
-
-    Parameters
-    ----------
-    frame_bgr : np.ndarray
-        Target frame in BGR color space (will be modified in-place).
-    det_boxes : list[list[float]]
-        Detection boxes in xyxy format (x1, y1, x2, y2).
-    det_confs : list[float] | None
-        Per-detection confidence scores (optional).
-    det_cids : list[int] | None
-        Per-detection class IDs (optional).
-    det_ids : list[int] | None
-        Tracker IDs (optional).
-    names : dict | list
-        Mapping from class id to class name (Ultralytics style).
-    overlay_mode : str
-        One of: "polygon", "boxes", "boxes_conf", "centroid".
-    polygons : list[np.ndarray] | None
-        List of Nx2 polygons (used when overlay_mode == "polygon").
-    show_anchor : bool
-        (Kept for compatibility) If True, show anchor dots.
-    anchor_points : list[tuple[float,float]] | None
-        Optional list of (cx, cy) anchor points for centroid mode.
     """
     if overlay_mode == "polygon" and polygons is not None and len(polygons) > 0 and sv is not None:
-        # If we have masks/polygons — draw them directly (PolygonAnnotator keeps polygons separately)
-        dets = sv.Detections.empty()  # not used directly; kept for API symmetry
         for poly in polygons:
             if poly is None or len(poly) < 3:
                 continue
             pts = np.array(poly, dtype=np.int32).reshape(-1, 1, 2)
             cv2.polylines(frame_bgr, [pts], True, (0, 255, 255), 2, cv2.LINE_AA)
     else:
-        # Boxes / Boxes+conf / Centroid
         if overlay_mode in ("boxes", "boxes_conf") and sv is not None and len(det_boxes) > 0:
             det = sv.Detections(
                 xyxy=np.array(det_boxes, dtype=np.float32),
@@ -65,7 +39,6 @@ def draw_detections(frame_bgr,
             try:
                 frame_bgr[:] = sv.BoxAnnotator(thickness=2).annotate(frame_bgr, det, labels=labels)
             except TypeError:
-                # Older supervision: annotate() without labels → draw boxes, then put labels manually
                 frame_bgr[:] = sv.BoxAnnotator(thickness=2).annotate(frame_bgr, det)
                 try:
                     for (x1, y1, x2, y2), lab in zip(det.xyxy, labels):
@@ -89,12 +62,24 @@ def draw_counters(frame_bgr, lines_cfg, line_counts, zones_cfg, zone_counts, tra
     # Lines + counters
     for li, ln in enumerate(lines_cfg):
         a = (int(ln["a"][0]), int(ln["a"][1])); b2 = (int(ln["b"][0]), int(ln["b"][1]))
-        cv2.line(frame_bgr, a, b2, (0, 255, 255), 3, cv2.LINE_AA)
+        col = (0, 255, 255)
+        # arrowed line A→B (fallback to plain line if arrow unsupported)
+        try:
+            cv2.arrowedLine(frame_bgr, a, b2, col, 2, tipLength=0.08)
+        except Exception:
+            cv2.line(frame_bgr, a, b2, col, 2, cv2.LINE_AA)
+        # endpoint markers + A/B labels
+        cv2.circle(frame_bgr, a, 4, col, -1, lineType=cv2.LINE_AA)
+        cv2.circle(frame_bgr, b2, 4, col, -1, lineType=cv2.LINE_AA)
+        cv2.putText(frame_bgr, "A", (a[0]+6, a[1]-6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
+        cv2.putText(frame_bgr, "B", (b2[0]+6, b2[1]-6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
+        # label near center
+        mid = (int((a[0]+b2[0])//2), int((a[1]+b2[1])//2))
         cv2.putText(
             frame_bgr,
-            f"{ln['name']}  A->B:{line_counts[li]['ab']}  B->A:{line_counts[li]['ba']}",
-            (min(a[0], b2[0]) + 6, min(a[1], b2[1]) - 6),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA
+            f"{ln['name']}  A→B:{line_counts[li]['ab']}  B→A:{line_counts[li]['ba']}",
+            (mid[0]+6, mid[1]-6),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA
         )
 
     # Zones + counters

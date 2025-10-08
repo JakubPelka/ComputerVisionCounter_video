@@ -376,15 +376,27 @@ def _draw_lines_zones(frame, lines_cfg, zones_cfg, frame_color, frame_thickness)
     th = int(frame_thickness if frame_thickness is not None else 2)
     if th <= 0:
         return
+    # Lines: arrow A->B + endpoint labels
     for ln in (lines_cfg or []):
-        a = tuple(map(int, ln["a"])); b = tuple(map(int, ln["b"]))
-        col = frame_color if frame_color is not None else (0,165,255)
-        cv2.line(frame, a, b, col, th, cv2.LINE_AA)
+        a = tuple(map(int, ln["a"]))
+        b = tuple(map(int, ln["b"]))
+        col = frame_color if frame_color is not None else (0, 165, 255)
+        try:
+            cv2.arrowedLine(frame, a, b, col, max(1, th), tipLength=0.08)
+        except Exception:
+            cv2.line(frame, a, b, col, th, cv2.LINE_AA)
+        cv2.circle(frame, a, 4, col, -1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, b, 4, col, -1, lineType=cv2.LINE_AA)
+        cv2.putText(frame, "A", (a[0] + 6, a[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
+        cv2.putText(frame, "B", (b[0] + 6, b[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
+
+    # Zones
     for zn in (zones_cfg or []):
         pts = np.array(zn["pts"], dtype=np.int32)
         if len(pts) >= 3:
-            col = frame_color if frame_color is not None else (0,165,255)
+            col = frame_color if frame_color is not None else (0, 165, 255)
             cv2.polylines(frame, [pts], True, col, th, cv2.LINE_AA)
+
 
 def _draw_trails(frame, trails, trace_color, trace_thickness):
     th = int(trace_thickness if trace_thickness is not None else 2)
@@ -401,18 +413,54 @@ def _draw_trails(frame, trails, trace_color, trace_thickness):
         pts = np.array(dq, dtype=np.int32)
         cv2.polylines(frame, [pts], False, col, th, cv2.LINE_AA)
 
+
+def _ab_dir_hint_for_line(ln: dict) -> str:
+    """
+    Human hint for what A->B means on screen, using the same cross-product
+    as the counter (see line_side).
+    Vertical-ish lines: Left->Right / Right->Left
+    Horizontal-ish lines: Up->Down / Down->Up
+    """
+    ax, ay = ln["a"]; bx, by = ln["b"]
+    dx, dy = bx - ax, by - ay
+    mx, my = (ax + bx) * 0.5, (ay + by) * 0.5
+
+    def s(px, py):
+        # same formula as line_side(a,b,p)
+        return (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+
+    if abs(dx) < abs(dy):  # vertical-ish -> use Left/Right
+        sl = s(mx - 10, my)  # left of the line
+        sr = s(mx + 10, my)  # right of the line
+        return "Left->Right" if sl < sr else "Right->Left"
+    else:                   # horizontal-ish -> use Up/Down
+        su = s(mx, my - 10)  # above (smaller y)
+        sd = s(mx, my + 10)  # below (larger y)
+        return "Up->Down" if su < sd else "Down->Up"
+
+
+
+
+
+
+
+
 def _draw_counts_labels(frame, lines_cfg, line_counts, zones_cfg, zone_counts):
     for i, ln in enumerate(lines_cfg or []):
         ax, ay = ln["a"]; bx, by = ln["b"]
         cx = int((ax + bx) / 2); cy = int((ay + by) / 2)
-        s = f"{ln['name']}  A→B:{line_counts[i]['ab']}  B→A:{line_counts[i]['ba']}"
-        cv2.putText(frame, s, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0,200,255), 2, cv2.LINE_AA)
+        hint = _ab_dir_hint_for_line(ln)
+        s = f"{ln['name']}  A->B:{line_counts[i]['ab']} ({hint})  B->A:{line_counts[i]['ba']}"
+        cv2.putText(frame, s, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2, cv2.LINE_AA)
+
     for i, zn in enumerate(zones_cfg or []):
         pts = np.array(zn["pts"], dtype=np.int32)
         if len(pts) >= 3:
-            cx = int(np.mean(pts[:,0])); cy = int(np.mean(pts[:,1]))
+            cx = int(np.mean(pts[:, 0])); cy = int(np.mean(pts[:, 1]))
             s = f"{zn['name']}  IN:{zone_counts[i]['in']} OUT:{zone_counts[i]['out']}"
-            cv2.putText(frame, s, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,200,255), 2, cv2.LINE_AA)
+            cv2.putText(frame, s, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2, cv2.LINE_AA)
+
+
 
 # ---------- Anchors & events ----------
 def _anchor_from_box(b, mode: str, ghost_margin: int = 0):

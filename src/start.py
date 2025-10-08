@@ -5,23 +5,24 @@ Bootstrap the runtime environment into ./_pkgs with a safe folder swap.
 - Install into _pkgs_new → atomically swap to _pkgs (no more PermissionError on .pyd).
 - Pinned versions (CPU-only, Python 3.12): numpy 1.26.4, scipy 1.11.4, OpenCV 4.10.0.84,
   torch 2.3.1+cpu, torchvision 0.18.1+cpu, ultralytics 8.3.201, lap>=0.5.12, etc.
-- Install order: numpy 1.26.4 first, then the base stack, then torch/vision with --no-deps,
-  then ultralytics + lap → prevents pulling NumPy 2.x.
 - Online mode (PyPI / CPU index) and offline mode (from ./wheels).
-- On success, launches the given script (dev → prod fallback).
+- On success, launches the given script (prefers src/cv_video.py by default).
 """
 
 import os, sys, subprocess, shutil, socket, time, runpy, argparse
 from pathlib import Path
+from paths import REPO_ROOT, PKGS as PKGS_DIR, PKGS_NEW, WHEELS as WHEELS_DIR
 
-HERE       = Path(__file__).resolve().parent
-PKGS_DIR   = HERE / "_pkgs"
-PKGS_NEW   = HERE / "_pkgs_new"
+HERE = REPO_ROOT
 PKGS_OLD   = HERE / f"_pkgs_old_{time.strftime('%Y%m%d_%H%M%S')}"
-WHEELS_DIR = HERE / "wheels"
 
-# Default target(s): prefer _dev if present, otherwise prod
-DEFAULT_TARGETS = ["cv_video.py"]
+# Default target(s) — we will look in /src first, then in root
+DEFAULT_TARGET_CANDIDATES = [
+    ("src", "cv_video.py"),
+    ("src", "cv_video_dev.py"),
+    (".",   "cv_video.py"),
+    (".",   "cv_video_dev.py"),
+]
 
 # Version pins — stable CPU-only set for Python 3.12
 PIN = {
@@ -64,7 +65,6 @@ def is_online(host="pypi.org", port=443, timeout=2.0) -> bool:
 def run_pip(args: list[str]) -> int:
     cmd = [sys.executable, "-m", "pip", *args]
     print(">>>", " ".join(cmd), flush=True)
-    # stream output live
     return subprocess.call(cmd)
 
 def ensure_dirs():
@@ -76,40 +76,27 @@ def ensure_dirs():
 def install_online() -> bool:
     log("[NET] Internet OK → installing into ./_pkgs_new")
     ok = True
-
-    # (a) NUMPY 1.26.4 FIRST
     if run_pip(["install","--upgrade","--no-cache-dir","--no-warn-script-location",
                 "--target", str(PKGS_NEW), PIN["numpy"]]) != 0:
         return False
-
-    # (b) BASE deps compatible with numpy 1.26.4
     base = [PIN["pillow"], PIN["opencv"], PIN["pyyaml"], PIN["pandas"], PIN["scipy"]]
     if run_pip(["install","--upgrade","--no-cache-dir","--no-warn-script-location",
                 "--target", str(PKGS_NEW), *base]) != 0:
         return False
-
-    # (c) Torch deps manually (torch/vision will be installed with --no-deps)
     deps = [PIN["filelock"], PIN["typing_extensions"], PIN["sympy"], PIN["networkx"],
             PIN["jinja2"], PIN["fsspec"], PIN["mkl"], PIN["intel_openmp"], PIN["tbb"]]
     if run_pip(["install","--upgrade","--no-cache-dir","--no-warn-script-location",
                 "--target", str(PKGS_NEW), *deps]) != 0:
         return False
-
-    # (d) TORCH + VISION from CPU index, WITHOUT deps (avoid pulling NumPy)
     if run_pip(["install","--upgrade","--no-cache-dir","--no-warn-script-location",
                 "--target", str(PKGS_NEW), "--index-url", TORCH_INDEX, "--no-deps", *TORCH_CPU]) != 0:
         return False
-
-    # (e) Ultralytics + lap (into _pkgs_new)
     if run_pip(["install","--upgrade","--no-cache-dir","--no-warn-script-location",
                 "--target", str(PKGS_NEW), PIN["ultra"], PIN["lap"]]) != 0:
         return False
-
-    # (f) (optional) supervision — keep or remove depending on needs
     if run_pip(["install","--upgrade","--no-cache-dir","--no-warn-script-location",
                 "--target", str(PKGS_NEW), "supervision>=0.20.0"]) != 0:
-         ok = False
-
+        ok = False
     return ok
 
 def install_offline() -> bool:
@@ -118,37 +105,26 @@ def install_offline() -> bool:
         log("[ERR] The ./wheels directory is empty."); return False
 
     ok = True
-    # (a) NUMPY 1.26.4 first
     if run_pip(["install","--no-index","--find-links", str(WHEELS_DIR),
                 "--no-warn-script-location","--target", str(PKGS_NEW), PIN["numpy"]]) != 0:
         return False
-
-    # (b) base
     base = [PIN["pillow"], PIN["opencv"], PIN["pyyaml"], PIN["pandas"], PIN["scipy"]]
     if run_pip(["install","--no-index","--find-links", str(WHEELS_DIR),
                 "--no-warn-script-location","--target", str(PKGS_NEW), *base]) != 0:
         return False
-
-    # (c) torch deps
     deps = [PIN["filelock"], PIN["typing_extensions"], PIN["sympy"], PIN["networkx"],
             PIN["jinja2"], PIN["fsspec"], PIN["mkl"], PIN["intel_openmp"], PIN["tbb"]]
     if run_pip(["install","--no-index","--find-links", str(WHEELS_DIR),
                 "--no-warn-script-location","--target", str(PKGS_NEW), *deps]) != 0:
         return False
-
-    # (d) torch/vision from wheels (also without deps)
     if run_pip(["install","--no-index","--find-links", str(WHEELS_DIR),
                 "--no-warn-script-location","--target", str(PKGS_NEW), "--no-deps", *TORCH_CPU]) != 0:
         return False
-
-    # (e) ultralytics + lap
     if run_pip(["install","--no-index","--find-links", str(WHEELS_DIR),
                 "--no-warn-script-location","--target", str(PKGS_NEW), PIN["ultra"], PIN["lap"]]) != 0:
         return False
-
-    # (f) supervision (optional)
     if run_pip(["install","--no-index","--find-links", str(WHEELS_DIR),
-              "--no-warn-script-location","--target", str(WHEELS_DIR), "supervision>=0.20.0"]):
+                "--no-warn-script-location","--target", str(WHEELS_DIR), "supervision>=0.20.0"]):
         return ok
 
 def module_path(m) -> str:
@@ -170,7 +146,6 @@ def verify_imports_from(pkgs_dir: Path) -> bool:
             raise RuntimeError("Torch too old: missing torch.library.register_fake (required by YOLOv11).")
         if not hasattr(blk, "C3k2"):
             raise RuntimeError("Ultralytics without C3k2 block (too old for YOLOv11).")
-        # verify modules are loaded from _pkgs_new
         for m in (torch, torchvision, numpy, cv2, ultralytics):
             p = module_path(m)
             if str(pkgs_dir) not in p:
@@ -180,7 +155,6 @@ def verify_imports_from(pkgs_dir: Path) -> bool:
     return ok
 
 def swap_pkgs_dirs() -> bool:
-    # old _pkgs → backup (if exists), _pkgs_new → _pkgs
     try:
         if PKGS_DIR.exists():
             try:
@@ -216,10 +190,11 @@ def need_install(force: bool) -> bool:
         return True
 
 def choose_default_target() -> Path | None:
-    for name in DEFAULT_TARGETS:
-        p = (HERE / name)
-        if p.exists():
-            return p
+    """Prefer src/cv_video.py; fall back to root if needed."""
+    for folder, fname in DEFAULT_TARGET_CANDIDATES:
+        cand = (HERE / folder / fname) if folder != "." else (HERE / fname)
+        if cand.exists():
+            return cand.resolve()
     return None
 
 def main():
@@ -252,7 +227,6 @@ def main():
     else:
         print("[INFO] Packages already present in ./_pkgs — skipping installation.")
 
-    # short listing
     try:
         items = list(PKGS_DIR.iterdir())
         print(f"[INFO] _pkgs contains: {len(items)} items (e.g.: " +
@@ -266,21 +240,23 @@ def main():
     else:
         t = choose_default_target()
         if t is None:
-            print("\n[INFO] No default script. Usage:")
-            print("  python bootstrap_env.py unidrone_video_dev.py")
-            print("  python bootstrap_env.py unidrone_video.py")
+            print("\n[INFO] No default script found.")
+            print("Examples:")
+            print("  python src/start.py src/cv_video.py")
+            print("  python src/start.py cv_video.py    (if you call from repo root)")
             sys.exit(0)
         target = t; target_args = []
         print(f"\n[INFO] No arguments → launching default: {target.name}")
 
     if not target.is_absolute():
+        # interpret relative to repo root
         target = (HERE / target).resolve()
     if not target.exists():
         print(f"[ERR] Not found: {target}"); sys.exit(2)
 
     print(f"\n=== Launching {target.name} ===")
     prefer_local_pkgs_on_sys_path(PKGS_DIR)
-    os.environ.setdefault("PYTHONNOUSERSITE", "1")  # avoid mixing user-site
+    os.environ.setdefault("PYTHONNOUSERSITE", "1")
     sys.argv = [str(target), *target_args]
     runpy.run_path(str(target), run_name="__main__")
 

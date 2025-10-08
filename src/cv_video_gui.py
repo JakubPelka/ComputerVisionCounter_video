@@ -8,6 +8,9 @@ import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
+# we use this to discover a first frame automatically if the caller didn't pass one
+from cv_video_core import SUPPORTED_VID_EXTS  # (.mp4, .mov, ...)
+
 def ensure_dir(p: Path) -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -57,10 +60,37 @@ class CounterEditor(tk.Toplevel):
         self.disp_w = self.disp_h = 0
         self.scale = 1.0
 
-        # For streams: try to grab the first frame if frame_bgr was not provided
+        # If stream provided but no frame, try to read one
         if self.live_cap is not None and frame_bgr is None:
             ok, fr = self.live_cap.read()
             frame_bgr = fr if ok else None
+
+        # If still no frame and not LIVE, try to open first available video from the main app
+        if frame_bgr is None and self.live_cap is None:
+            try:
+                cand: Path | None = None
+                # 1) selected files in main window
+                if hasattr(master, "selected_files") and master.selected_files:
+                    cand = Path(master.selected_files[0])
+                # 2) first video in input_dir
+                elif hasattr(master, "input_dir"):
+                    try:
+                        inp = Path(master.input_dir.get())
+                    except Exception:
+                        inp = None
+                    if inp and inp.exists():
+                        for p in sorted(inp.iterdir()):
+                            if p.suffix.lower() in SUPPORTED_VID_EXTS:
+                                cand = p
+                                break
+                if cand and cand.exists():
+                    cap = cv2.VideoCapture(str(cand))
+                    ok, fr = cap.read()
+                    cap.release()
+                    if ok:
+                        frame_bgr = fr
+            except Exception:
+                pass
 
         if frame_bgr is None:
             frame_bgr = np.zeros((720,1280,3), dtype=np.uint8)
@@ -81,6 +111,19 @@ class CounterEditor(tk.Toplevel):
         tk.Button(controls, text="Save…", command=self.save_dialog).pack(side="left", padx=4)
         tk.Button(controls, text="OK (Save & close)", command=self.finish).pack(side="right", padx=4)
 
+        # Quick rules for A->B direction (ASCII only so it renders everywhere)
+        rules = (
+            "Line counter rules:\n"
+            "• Vertical line, A at bottom -> B at top:  Left->Right counts as A->B (Right->Left = B->A)\n"
+            "• Vertical line, A at top    -> B at bottom: Right->Left counts as A->B (Left->Right = B->A)\n"
+            "• Horizontal line, A at left -> B at right:  Up->Down counts as A->B (Down->Up = B->A)"
+        )
+        note = tk.Label(self, text=rules, justify="left", anchor="e", fg="#666")
+        note.pack(side="bottom", fill="x", padx=8, pady=(4, 8))
+
+
+
+
         self.hint = tk.Label(self, text="Mode: LIVE" if self.live else "Mode: static frame")
         self.hint.pack(fill="x")
 
@@ -92,9 +135,12 @@ class CounterEditor(tk.Toplevel):
             except Exception:
                 pass
 
-        # Start LIVE loop
+        # Start LIVE loop (if applicable)
         if self.live:
             self._tick_live()
+
+        # ⟵ quality of life: open in “Add line” so clicks immediately place A then B
+        self.set_mode("line")
 
     # ---------- Canvas init/resize ----------
     def _init_canvas_with_frame(self, frame_bgr: np.ndarray):
@@ -134,7 +180,7 @@ class CounterEditor(tk.Toplevel):
         self.cur_points = []
         if m in ("line", "zone") and self.live:
             self._pause_live()
-            self.hint.config(text="PAUSE – draw (Backspace undo, Enter finish).")
+            self.hint.config(text="PAUSE – draw (Backspace undo, Enter finish). First click = A, second = B.")
         elif m == "idle":
             self.hint.config(text="Mode: idle" if not self.live else "LIVE")
         self._redraw_overlay_only()
@@ -152,7 +198,7 @@ class CounterEditor(tk.Toplevel):
             self.hint.config(text="Mode: static frame")
             return
         self.live = True
-        self.hint.config(text="LIVE – set camera and frame; select drawing to pause.")
+        self.hint.config(text="LIVE – select drawing tool to pause.")
         self._tick_live()
 
     def clear_and_resume(self):
@@ -193,7 +239,7 @@ class CounterEditor(tk.Toplevel):
             self._redraw_overlay_only()
 
     def ask_name_and_add_line(self, a, b):
-        name = self._ask_name("Line name (direction A→B):")
+        name = self._ask_name("Line name — first click=A, second=B (direction A→B):")
         if not name: return
         self.lines.append({"name": name, "a": [float(a[0]), float(a[1])], "b":[float(b[0]), float(b[1])]})
         self._redraw_overlay_only()
@@ -206,9 +252,9 @@ class CounterEditor(tk.Toplevel):
 
     def _ask_name(self, prompt):
         win = tk.Toplevel(self); win.title("Name")
-        tk.Label(win, text=prompt).pack(padx=6, pady=6)
+        tk.Label(win, text=prompt, justify="left", anchor="w").pack(padx=6, pady=6, fill="x")
         var = tk.StringVar()
-        e = tk.Entry(win, textvariable=var); e.pack(padx=6, pady=6); e.focus_set()
+        e = tk.Entry(win, textvariable=var); e.pack(padx=6, pady=6, fill="x"); e.focus_set()
         out = {"val": None}
         def ok():
             out["val"] = var.get().strip(); win.destroy()
@@ -223,18 +269,26 @@ class CounterEditor(tk.Toplevel):
 
     def _redraw_overlay_only(self):
         self.canvas.delete("overlay")
-        # cur_points — yellow
+        # current points — yellow
         for i,p in enumerate(self.cur_points):
             dx,dy = self.img_to_disp(p[0], p[1])
             self.canvas.create_oval(dx-3, dy-3, dx+3, dy+3, fill="yellow", outline="", tags="overlay")
             if i>0:
                 px,py = self.img_to_disp(self.cur_points[i-1][0], self.cur_points[i-1][1])
                 self.canvas.create_line(px,py,dx,dy, fill="yellow", width=2, tags="overlay")
-        # lines
+        # lines with A/B markers + arrow A→B
         for ln in self.lines:
             a = self.img_to_disp(*ln["a"]); b = self.img_to_disp(*ln["b"])
-            self.canvas.create_line(a[0],a[1],b[0],b[1], fill="#00FFFF", width=3, tags="overlay")
-            self.canvas.create_text((a[0]+b[0])/2, (a[1]+b[1])/2 - 10, text=ln["name"], fill="#00FFFF", tags="overlay")
+            # main line with arrow
+            self.canvas.create_line(a[0],a[1],b[0],b[1], fill="#00FFFF", width=3,
+                                    arrow="last", arrowshape=(12,14,6), tags="overlay")
+            # endpoints
+            self.canvas.create_oval(a[0]-3,a[1]-3,a[0]+3,a[1]+3, fill="#00FFFF", outline="", tags="overlay")
+            self.canvas.create_oval(b[0]-3,b[1]-3,b[0]+3,b[1]+3, fill="#00FFFF", outline="", tags="overlay")
+            self.canvas.create_text(a[0]+8, a[1]-8, text="A", fill="#00FFFF", tags="overlay")
+            self.canvas.create_text(b[0]+8, b[1]-8, text="B", fill="#00FFFF", tags="overlay")
+            # label
+            self.canvas.create_text((a[0]+b[0])/2, (a[1]+b[1])/2 - 12, text=f"{ln['name']}  (A->B)", fill="#00FFFF", tags="overlay")
         # zones
         for zn in self.zones:
             pts = [self.img_to_disp(x,y) for x,y in zn["pts"]]
@@ -293,6 +347,7 @@ class CounterEditor(tk.Toplevel):
         self._redraw_overlay_only()
 
 class AppUIMixin:
+    # unchanged UI helpers (only here so imports keep working in your app)
     def build_ui(self):
         frm = tk.Frame(self); frm.pack(fill="both", expand=True, padx=8, pady=6)
 
@@ -330,15 +385,6 @@ class AppUIMixin:
         self.preset_label = tk.Label(qf, text=""); self.preset_label.pack(side="left")
         self._update_preset_label()
 
-        # CPU Profiles – presets
-        prof = tk.LabelFrame(frm, text="Profiles (CPU)")
-        prof.pack(fill="x", pady=(2,4))
-        self.cpu_profile = getattr(self, "cpu_profile", None) or tk.StringVar(value="Default")
-        cb = ttk.Combobox(prof, values=["Default","CPU Turbo","CPU Balanced","CPU Quality"],
-                          textvariable=self.cpu_profile, state="readonly", width=16)
-        cb.pack(side="left", padx=6, pady=2)
-        tk.Button(prof, text="Apply profile", command=self._apply_cpu_profile).pack(side="left", padx=6)
-
         # Overlay
         ov = tk.LabelFrame(frm, text="Visualization (overlay)"); ov.pack(fill="x", pady=4)
         tk.Radiobutton(ov, text="Centroids",   variable=self.overlay_mode, value="centroid").pack(side="left", padx=6)
@@ -367,65 +413,13 @@ class AppUIMixin:
         self.progressbar.pack(fill="x", side="left", expand=True)
         tk.Label(pf, textvariable=self.progress_label, width=36, anchor="w").pack(side="left", padx=6)
 
-        # Preview / Trace / Anchor / Ghost
-        pvf = tk.LabelFrame(frm, text="Preview / Trace / Anchor / Ghost")
-        pvf.pack(fill="x", pady=(4, 6))
-        self.preview_enabled = getattr(self, "preview_enabled", None) or tk.BooleanVar(value=True)
-        tk.Checkbutton(pvf, text="Enable preview", variable=self.preview_enabled).pack(side="left", padx=6)
-        self.trace_enabled = getattr(self, "trace_enabled", None) or tk.BooleanVar(value=True)
-        self.trace_len     = getattr(self, "trace_len", None) or tk.IntVar(value=24)
-        self.anchor_mode   = getattr(self, "anchor_mode", None) or tk.StringVar(value="bottom")
-        self.ghost_margin  = getattr(self, "ghost_margin", None) or tk.IntVar(value=12)
-        tk.Checkbutton(pvf, text="Trace", variable=self.trace_enabled).pack(side="left", padx=(6, 4))
-        tk.Label(pvf, text="len:").pack(side="left")
-        tk.Spinbox(pvf, from_=0, to=300, width=5, textvariable=self.trace_len).pack(side="left", padx=(2, 12))
-        tk.Label(pvf, text="Anchor:").pack(side="left")
-        ttk.Combobox(pvf, values=["bottom","center"], width=8, state="readonly",
-                     textvariable=self.anchor_mode).pack(side="left", padx=(3, 12))
-        tk.Label(pvf, text="Ghost margin (px):").pack(side="left")
-        tk.Spinbox(pvf, from_=0, to=64, width=5, textvariable=self.ghost_margin).pack(side="left", padx=(3, 6))
-
-        # SOUND ALERTS
-        af = tk.LabelFrame(frm, text="Sound alert (zones)")
-        af.pack(fill="x", pady=(0,8))
-        self.alert_enabled = getattr(self, "alert_enabled", None) or tk.BooleanVar(value=False)
-        self.alert_classes = getattr(self, "alert_classes", None) or tk.StringVar(value="cat,person")
-        self.alert_freq    = getattr(self, "alert_freq", None)    or tk.IntVar(value=880)
-        self.alert_dur     = getattr(self, "alert_dur", None)     or tk.IntVar(value=180)
-        self.alert_freeze  = getattr(self, "alert_freeze", None)  or tk.IntVar(value=1500)  # ms
-        tk.Checkbutton(af, text="Enable alert", variable=self.alert_enabled).pack(side="left", padx=6)
-        tk.Label(af, text="Classes (CSV):").pack(side="left")
-        tk.Entry(af, textvariable=self.alert_classes, width=24).pack(side="left", padx=(3, 12))
-        tk.Label(af, text="Hz:").pack(side="left")
-        tk.Spinbox(af, from_=200, to=4000, width=6, textvariable=self.alert_freq).pack(side="left", padx=(3, 12))
-        tk.Label(af, text="ms:").pack(side="left")
-        tk.Spinbox(af, from_=30, to=2000, width=6, textvariable=self.alert_dur).pack(side="left", padx=(3, 12))
-        tk.Label(af, text="freeze (ms):").pack(side="left")
-        tk.Spinbox(af, from_=0, to=10000, width=7, textvariable=self.alert_freeze).pack(side="left", padx=(3, 6))
-
         # Log
         logf = tk.Frame(frm); logf.pack(fill="both", expand=True)
         self.log = tk.Text(logf, height=10, state="normal"); self.log.pack(fill="both", expand=True)
-        self._update_preset_label()
 
-    # ====== CPU Profile: sets adv_params and enables override ======
-    def _apply_cpu_profile(self):
-        prof = self.cpu_profile.get()
-        # Safe base
-        base = dict(imgsz=384, conf=0.60, iou=0.50, frame_skip=2,
-                    track_buffer=4, match_thresh=0.88, min_hits=2,
-                    line_min_gap=8, line_min_sep=12, zone_min_gap=6)
-        if prof == "CPU Turbo":
-            base.update(imgsz=320, frame_skip=3, track_buffer=3, match_thresh=0.90, min_hits=1)
-        elif prof == "CPU Balanced":
-            base.update(imgsz=384, frame_skip=2, track_buffer=4, match_thresh=0.88, min_hits=2)
-        elif prof == "CPU Quality":
-            base.update(imgsz=512, frame_skip=1, track_buffer=6, match_thresh=0.85, min_hits=2)
-        else:
-            self.advanced_override = False
-            self._log("[PROFILE] Default – will use preset from quality slider.")
-            self._update_preset_label(); return
-        self.adv_params = base
-        self.advanced_override = True
-        self._log(f"[PROFILE] Applied: {prof} → {base}")
-        self._update_preset_label()
+    # (helper used by your App)
+    def _row_browse(self, parent, label, var, cmd, is_dir=True):
+        f = tk.Frame(parent); f.pack(fill="x", pady=3)
+        tk.Label(f, text=label, width=26, anchor="w").pack(side="left")
+        tk.Entry(f, textvariable=var).pack(side="left", fill="x", expand=True, padx=6)
+        tk.Button(f, text="Browse…", command=cmd).pack(side="left")
