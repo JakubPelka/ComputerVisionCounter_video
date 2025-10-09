@@ -8,3 +8,4 @@ models/yolo11x.pt
 /presets
 /output
 /src/__pycache__
+/temp
