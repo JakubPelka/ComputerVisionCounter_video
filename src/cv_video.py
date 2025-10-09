@@ -7,7 +7,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from cv_video_gui import ScrollableFrame, CounterEditor, AppUIMixin  # GUI utils
-from cv_video_run import run as core_run, SoundPlayer               # ⟵ added SoundPlayer import
+from cv_video_run import run as core_run
+from cv_video_sound import SoundPlayer
 from cv_video_core import (
     ensure_dir,
     score_weight_name, find_best_weights, resolve_weights_to_pt,
@@ -15,6 +16,15 @@ from cv_video_core import (
     VIDEO_PRESETS, DEFAULT_QUALITY, DEFAULT_TRACKER,
     LINE_MIN_GAP_FRAMES_DEFAULT, LINE_MIN_SEP_PX_DEFAULT, ZONE_MIN_GAP_FRAMES_DEFAULT,
 )
+
+# preview mixin
+from cv_video_preview import (
+    preview_ensure, preview_show, preview_on_resize, preview_destroy,
+    preview_suppress, preview_is_suppressed,
+)
+
+# advanced UI builder (moved out)
+from cv_video_advanced_ui import build_advanced_settings
 
 import cv2
 from PIL import Image, ImageTk
@@ -27,98 +37,10 @@ except Exception as e:
     print("Ultralytics check:", e, file=sys.stderr)
 
 # ---------- Branding & default paths ----------
-from paths import REPO_ROOT, INPUTS as DEFAULT_IN_DIR, OUTPUTS as DEFAULT_OUT_DIR, MODELS as DEFAULT_MODELS_DIR, SOUNDS as DEFAULT_SOUNDS_DIR  # ⟵ nowość
+from paths import REPO_ROOT, INPUTS as DEFAULT_IN_DIR, OUTPUTS as DEFAULT_OUT_DIR, MODELS as DEFAULT_MODELS_DIR, SOUNDS as DEFAULT_SOUNDS_DIR
 
 APP_NAME = "ComputerVisionCounter VIDEO"
 PROJECT_ROOT = REPO_ROOT
-
-# -------------------- Context help (right panel) --------------------
-ADV_HELP_INTRO = (
-    "Click or hover any field to see a short explanation and tips.\n\n"
-    "Quick tips:\n"
-    "• Missing objects → lower conf a bit, raise imgsz, or reduce frame_skip.\n"
-    "• Too many false detections → raise conf.\n"
-    "• Two boxes on one object → raise iou slightly.\n"
-    "• Nearby objects glued into one → lower iou slightly.\n"
-    "• IDs drop after occlusion → raise track_buffer or lower match_thresh a little.\n"
-    "• ID sticks after object is gone → lower track_buffer or raise match_thresh.\n"
-    "• Double counts on a line → raise line_min_gap_frames or line_min_sep_px.\n"
-    "• Zone IN/OUT flicker → raise zone_min_gap_frames.\n"
-    "• Line at the bottom edge → Anchor=bottom and increase Ghost margin."
-)
-
-ADV_HELP_BY_KEY = {
-    # Detection / tracking / hysteresis
-    "imgsz": ("imgsz",
-              "Size of the image sent to the AI.\n"
-              "Bigger = sharper detections but slower.\n"
-              "Tip: 320–640 for CPU; 960–1280 only for small/far objects."),
-    "conf": ("conf",
-             "Confidence filter. Higher = stricter (fewer false alarms, more misses).\n"
-             "Start 0.50–0.60. Misses? lower a bit. Too many fakes? raise."),
-    "iou": ("iou",
-            "Box overlap used to remove duplicates. Higher merges more; lower keeps more boxes.\n"
-            "Two boxes on one object → raise a little. Close objects merge → lower a little."),
-    "frame_skip": ("frame_skip",
-                   "How many frames to skip between analyses. 0 = every frame (best quality, slowest).\n"
-                   "+1 or +2 speeds up but can miss fast motion."),
-    "track_buffer": ("track_buffer",
-                     "How long (in frames) a lost object ID is kept alive.\n"
-                     "Higher survives short occlusions; too high may leave ghost IDs."),
-    "match_thresh": ("match_thresh",
-                     "How strict matching is when assigning boxes to existing IDs.\n"
-                     "Higher = stricter (fewer wrong matches, more ID resets)."),
-    "min_hits": ("min_hits",
-                 "Frames needed before a new track is confirmed.\n"
-                 "Short flickers? raise. Delayed ID appearance? lower."),
-    "line_min_gap_frames": ("line_min_gap_frames",
-                            "Minimum frames between two line counts for the same object (anti-bounce)."),
-    "line_min_sep_px": ("line_min_sep_px",
-                        "Minimum movement across the line (pixels) to count again.\n"
-                        "Sliding along the line double-counts? raise this."),
-    "zone_min_gap_frames": ("zone_min_gap_frames",
-                            "Minimum frames between zone IN/OUT events for the same object.\n"
-                            "IN/OUT toggling on the border? raise this."),
-
-    # Overlay / Trace / Anchor / Ghost
-    "preview_enabled": ("Enable LIVE preview",
-                        "Shows processed video while running. Turn off to save CPU."),
-    "trace_enabled": ("Trace",
-                      "Draw a tail behind each object."),
-    "trace_len": ("Trace len",
-                  "How many recent points to keep for the tail."),
-    "anchor_mode": ("Anchor",
-                    "Point used for counting & trails.\n"
-                    "bottom → feet/wheels on the ground (best for floor lines)\n"
-                    "center → center of box."),
-    "ghost_margin": ("Ghost margin (px)",
-                     "Only for 'bottom' anchor: lift the point above the box edge.\n"
-                     "Useful if the bottom edge touches the frame border or bounces on a line."),
-
-    # Colors / thickness
-    "trace_color": ("Trace color",
-                    "Use 'auto', a #RRGGBB color (e.g. #00FF88), or B,G,R (e.g. 255,200,0)."),
-    "trace_thickness": ("Trace thickness",
-                        "Line width in pixels (0–16). 0 hides traces."),
-    "overlay_frame_color": ("Frame color",
-                            "Color for lines & zone outlines. Same format as Trace color."),
-    "overlay_frame_thickness": ("Frame thickness",
-                                "Line width in pixels (0–16). 0 hides frame lines."),
-
-    # Sound alert (uses selected classes from the main window)
-    "alert_enabled": ("Enable alert",
-                      "Turn zone/line sound on or off. Uses currently selected classes."),
-    "alert_sound": ("Alert sound file",
-                    "Pick a WAV/MP3 file to play for alerts. Works on macOS, Linux, and Windows.\n"
-                    "Tip: WAV is the most reliable everywhere."),
-    "alert_loop": ("Loop while active",
-                   "If ON: keeps playing sound while a target matches the condition.\n"
-                   "If OFF: plays single pings, rate-limited by 'freeze (s)'."),
-    "alert_freeze_s": ("freeze (s)",
-                       "Minimum time in seconds between two sound starts (for pings or loop restarts)."),
-    "alert_zone_inside": ("Mode",
-                          "Choose when to play: inside the zone or outside the zone."),
-}
 
 
 class App(AppUIMixin, tk.Tk):
@@ -164,11 +86,10 @@ class App(AppUIMixin, tk.Tk):
             "anchor_mode": "center",
             "ghost_margin": 24,
             "alert_enabled": False,
-            # NEW sound settings:
-            "alert_freeze_s": 2,   # seconds between sound starts
-            "alert_zone_inside": 1,  # 1 = inside zone, 0 = outside zone
-            "alert_sound": "",       # path to wav/mp3
-            "alert_loop": True,      # loop while active
+            "alert_freeze_s": 2,
+            "alert_zone_inside": 1,
+            "alert_sound": "",
+            "alert_loop": True,
             "trace_color": "auto",
             "trace_thickness": 2,
             "overlay_frame_color": "auto",
@@ -202,6 +123,15 @@ class App(AppUIMixin, tk.Tk):
         self.build_ui_compact()
         self._autoload_best_model()
 
+        # Attach preview helpers as bound methods (mixin-style)
+        App._ensure_preview_window = preview_ensure
+        App._show_preview_bgr     = preview_show
+        App._on_preview_resize    = preview_on_resize
+        App._destroy_preview_window = preview_destroy
+        App._preview_suppress     = preview_suppress
+        App._preview_is_suppressed = preview_is_suppressed
+
+
     # small helper for test sound
     def _play_test_sound(self, path: str | None):
         """Play selected alert sound once (non-blocking)."""
@@ -214,7 +144,6 @@ class App(AppUIMixin, tk.Tk):
                 messagebox.showerror("Alert sound", f"File not found:\n{p}")
                 return
             sp = SoundPlayer(p)
-            # stop any previous test loops (safe no-op if none)
             try:
                 sp.stop()
             except Exception:
@@ -280,19 +209,17 @@ class App(AppUIMixin, tk.Tk):
         lf = tk.LabelFrame(root, text="Class selection (after loading weights)")
         lf.pack(fill="both", expand=True, pady=4)
 
-        # Toggle row (same layout as CvC_images)
+        # Toggle row
         tog = tk.Frame(lf); tog.pack(fill="x", pady=(4, 0))
         tk.Label(tog, text="Toggle:").pack(side="left")
         tk.Button(tog, text="All",   width=6, command=self._toggle_all_classes).pack(side="left", padx=(6, 0))
         tk.Button(tog, text="None",  width=6, command=self._toggle_none_classes).pack(side="left", padx=(6, 0))
         tk.Button(tog, text="Invert",width=6, command=self._toggle_invert_classes).pack(side="left", padx=(6, 0))
 
-        # Scroll area for checkboxes (unchanged)
+        # Scroll area for checkboxes
         self.classes_scroll = ScrollableFrame(lf, height=220)
         self.classes_scroll.pack(fill="both", expand=True)
-        # react to real canvas resize (keeps the nice grid)
         self.classes_scroll.canvas.bind("<Configure>", self._on_classes_canvas_config)
-
 
         # Controls + Progress
         bf = tk.Frame(root); bf.pack(fill="x", pady=6)
@@ -323,7 +250,6 @@ class App(AppUIMixin, tk.Tk):
                                        f"skip={p['frame_skip']}  buf={p['track_buffer']}  "
                                        f"match={p['match_thresh']}  hits={p['min_hits']}"))
 
-
     def _toggle_all_classes(self):
         for _nm, var, _idx in getattr(self, "class_vars", []):
             try: var.set(True)
@@ -338,18 +264,6 @@ class App(AppUIMixin, tk.Tk):
         for _nm, var, _idx in getattr(self, "class_vars", []):
             try: var.set(not var.get())
             except Exception: pass
-
-    def _preview_suppress(self, ms: int = 2000):
-        """Block preview creation/updates for ms milliseconds (to finish abort cleanly)."""
-        import time
-        self._preview_suppress_until = time.monotonic() + (ms / 1000.0)
-
-    def _preview_is_suppressed(self) -> bool:
-        import time
-        return getattr(self, "_preview_suppress_until", 0.0) > time.monotonic()
-
-
-
 
     # ========== model loading logic ==========
     def browse_input(self):
@@ -484,246 +398,17 @@ class App(AppUIMixin, tk.Tk):
     def selected_class_indices(self):
         return [idx for (nm, v, idx) in self.class_vars if v.get()]
 
-    # ========== ADVANCED OPTIONS (with dynamic help) ==========
+    # ========== ADVANCED OPTIONS ==========
     def open_advanced(self):
-        """Advanced options window — with a right-side context help panel."""
-        from tkinter import colorchooser
-
+        """Advanced options window (delegate to external builder)."""
         win = tk.Toplevel(self)
         win.transient(self)
-        win.grab_set()
-        win.lift(); win.focus_force()
         win.title(f"Advanced options — {APP_NAME}")
         win.geometry("1000x780")
-
-        # two-pane layout
-        root = tk.Frame(win); root.pack(fill="both", expand=True)
-        left = tk.Frame(root); left.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
-        right = tk.Frame(root, width=360); right.pack(side="left", fill="y", padx=(8, 8), pady=8)
-
-        # right-side help widgets
-        help_title = tk.Label(right, text="Help", font=("TkDefaultFont", 10, "bold"), anchor="w")
-        help_title.pack(fill="x", pady=(0,4))
-        hl = tk.Frame(right); hl.pack(fill="both", expand=True)
-        sb = tk.Scrollbar(hl, orient="vertical")
-        help_text = tk.Text(hl, wrap="word", yscrollcommand=sb.set)
-        sb.config(command=help_text.yview)
-        sb.pack(side="right", fill="y")
-        help_text.pack(side="left", fill="both", expand=True)
-        def set_help(title: str, body: str):
-            try:
-                help_title.config(text=title or "Help")
-                help_text.config(state="normal")
-                help_text.delete("1.0", "end")
-                help_text.insert("1.0", body or "")
-                help_text.config(state="disabled")
-            except Exception:
-                pass
-        set_help("Tips", ADV_HELP_INTRO)
-
-        def attach_help(widget, key: str):
-            title, body = ADV_HELP_BY_KEY.get(key, (key, ""))
-            def _show(_e=None, t=title, b=body):
-                set_help(t, b)
-            try:
-                widget.bind("<FocusIn>", _show)
-                widget.bind("<Enter>", _show)
-            except Exception:
-                pass
-
-        # Base from presets or current override
-        p = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
-        base = self.adv_params if getattr(self, "advanced_override", False) else {
-            **p,
-            "line_min_gap": LINE_MIN_GAP_FRAMES_DEFAULT,
-            "line_min_sep": LINE_MIN_SEP_PX_DEFAULT,
-            "zone_min_gap": ZONE_MIN_GAP_FRAMES_DEFAULT,
-            "preview_enabled": bool(self.preview_enabled.get()),
-            "trace_enabled": bool(self.trace_enabled.get()),
-            "trace_len": int(self.trace_len.get()),
-            "anchor_mode": self.anchor_mode.get(),
-            "ghost_margin": int(self.ghost_margin.get()),
-            "alert_enabled": bool(self.alert_enabled.get()),
-            "alert_freeze_s": int(self.alert_freeze_s.get()),
-            "alert_zone_inside": 1,
-            "trace_color": str(self.adv_params.get("trace_color", "auto")) if getattr(self, "advanced_override", False) else "auto",
-            "trace_thickness": int(self.adv_params.get("trace_thickness", 2)) if getattr(self, "advanced_override", False) else 2,
-            "overlay_frame_color": str(self.adv_params.get("overlay_frame_color", "auto")) if getattr(self, "advanced_override", False) else "auto",
-            "overlay_frame_thickness": int(self.adv_params.get("overlay_frame_thickness", 2)) if getattr(self, "advanced_override", False) else 2,
-            # NEW:
-            "alert_sound": self.alert_sound.get(),
-            "alert_loop": bool(self.alert_loop.get()),
-        }
-
-        def row(parent, label, var, w=18, key: str|None=None):
-            f = tk.Frame(parent); f.pack(fill="x", pady=3)
-            tk.Label(f, text=label, width=26, anchor="w").pack(side="left")
-            ent = tk.Entry(f, textvariable=var, width=w)
-            ent.pack(side="left")
-            if key: attach_help(ent, key)
-            return f, ent
-
-        # --- Detection/Tracking/Hysteresis ---
-        frm_basic = tk.LabelFrame(left, text="Detection / Tracking / Hysteresis"); frm_basic.pack(fill="x", padx=0, pady=6)
-        v_imgsz = tk.StringVar(value=str(base.get("imgsz", "")));     row(frm_basic, "imgsz", v_imgsz, key="imgsz")
-        v_conf  = tk.StringVar(value=str(base.get("conf", "")));      row(frm_basic, "conf", v_conf, key="conf")
-        v_iou   = tk.StringVar(value=str(base.get("iou", "")));       row(frm_basic, "iou", v_iou, key="iou")
-        v_skip  = tk.StringVar(value=str(base.get("frame_skip", "")));row(frm_basic, "frame_skip", v_skip, key="frame_skip")
-        v_buf   = tk.StringVar(value=str(base.get("track_buffer", ""))); row(frm_basic, "track_buffer", v_buf, key="track_buffer")
-        v_match = tk.StringVar(value=str(base.get("match_thresh", ""))); row(frm_basic, "match_thresh", v_match, key="match_thresh")
-        v_hits  = tk.StringVar(value=str(base.get("min_hits", "")));  row(frm_basic, "min_hits", v_hits, key="min_hits")
-        v_lgap  = tk.StringVar(value=str(base.get("line_min_gap", ""))); row(frm_basic, "line_min_gap_frames", v_lgap, key="line_min_gap_frames")
-        v_lsep  = tk.StringVar(value=str(base.get("line_min_sep", ""))); row(frm_basic, "line_min_sep_px", v_lsep, key="line_min_sep_px")
-        v_zhgap = tk.StringVar(value=str(base.get("zone_min_gap", ""))); row(frm_basic, "zone_min_gap_frames", v_zhgap, key="zone_min_gap_frames")
-
-        # --- Overlay / Trace / Anchor / Ghost ---
-        frm_vis = tk.LabelFrame(left, text="Overlay / Trace / Anchor / Ghost"); frm_vis.pack(fill="x", padx=0, pady=6)
-        v_prev  = tk.BooleanVar(value=bool(base.get("preview_enabled", True)))
-        v_trace = tk.BooleanVar(value=bool(base.get("trace_enabled", True)))
-        v_tlen  = tk.IntVar(value=int(base.get("trace_len", 24)))
-        v_anch  = tk.StringVar(value=str(base.get("anchor_mode", "center")))
-        v_ghost = tk.IntVar(value=int(base.get("ghost_margin", 12)))
-        cb_prev = tk.Checkbutton(frm_vis, text="Enable LIVE preview", variable=v_prev); cb_prev.pack(side="left", padx=6, pady=4); attach_help(cb_prev, "preview_enabled")
-        cb_trace= tk.Checkbutton(frm_vis, text="Trace", variable=v_trace); cb_trace.pack(side="left", padx=(12,4)); attach_help(cb_trace, "trace_enabled")
-        tk.Label(frm_vis, text="len:").pack(side="left")
-        sp_len = tk.Spinbox(frm_vis, from_=0, to=300, width=5, textvariable=v_tlen); sp_len.pack(side="left", padx=(2, 12)); attach_help(sp_len, "trace_len")
-        tk.Label(frm_vis, text="Anchor:").pack(side="left")
-        cb_anchor = ttk.Combobox(frm_vis, values=["bottom","center"], width=8, state="readonly", textvariable=v_anch)
-        cb_anchor.pack(side="left", padx=(3, 12)); attach_help(cb_anchor, "anchor_mode")
-        tk.Label(frm_vis, text="Ghost margin (px):").pack(side="left")
-        sp_ghost = tk.Spinbox(frm_vis, from_=0, to=64, width=5, textvariable=v_ghost); sp_ghost.pack(side="left", padx=(3, 6)); attach_help(sp_ghost, "ghost_margin")
-
-        # --- Colors/Thickness + pickers ---
-        frm_colors = tk.LabelFrame(left, text="Colors/Thickness (overlay)"); frm_colors.pack(fill="x", padx=0, pady=6)
-        v_tcolor = tk.StringVar(value=str(base.get("trace_color", "auto")))
-        v_tth    = tk.IntVar(value=int(base.get("trace_thickness", 2)))
-        v_fcolor = tk.StringVar(value=str(base.get("overlay_frame_color", "auto")))
-        v_fth    = tk.IntVar(value=int(base.get("overlay_frame_thickness", 2)))
-
-        def _pick_to_var(var):
-            try:
-                init = var.get().strip()
-                rgb, hexv = colorchooser.askcolor(initialcolor=init if init.startswith("#") else None, title="Pick a color", parent=win)
-                if hexv:
-                    var.set(hexv.upper())
-                win.lift(); win.focus_force()
-            except Exception:
-                pass
-
-        r1 = tk.Frame(frm_colors); r1.pack(fill="x", pady=3)
-        tk.Label(r1, text="Trace color (auto/#RRGGBB/B,G,R)", width=26, anchor="w").pack(side="left")
-        ent_tcolor = tk.Entry(r1, textvariable=v_tcolor, width=18); ent_tcolor.pack(side="left"); attach_help(ent_tcolor, "trace_color")
-        tk.Button(r1, text="Pick…", command=lambda: _pick_to_var(v_tcolor)).pack(side="left", padx=6)
-        f = tk.Frame(frm_colors); f.pack(fill="x", pady=2)
-        tk.Label(f, text="Trace thickness (px)", width=26, anchor="w").pack(side="left")
-        sp_tth = tk.Spinbox(f, from_=0, to=16, width=6, textvariable=v_tth); sp_tth.pack(side="left"); attach_help(sp_tth, "trace_thickness")
-
-        r2 = tk.Frame(frm_colors); r2.pack(fill="x", pady=3)
-        tk.Label(r2, text="Frame color (auto/#RRGGBB/B,G,R)", width=26, anchor="w").pack(side="left")
-        ent_fcolor = tk.Entry(r2, textvariable=v_fcolor, width=18); ent_fcolor.pack(side="left"); attach_help(ent_fcolor, "overlay_frame_color")
-        tk.Button(r2, text="Pick…", command=lambda: _pick_to_var(v_fcolor)).pack(side="left", padx=6)
-        f2 = tk.Frame(frm_colors); f2.pack(fill="x", pady=2)
-        tk.Label(f2, text="Frame thickness (px)", width=26, anchor="w").pack(side="left")
-        sp_fth = tk.Spinbox(f2, from_=0, to=16, width=6, textvariable=v_fth); sp_fth.pack(side="left"); attach_help(sp_fth, "overlay_frame_thickness")
-
-        # --- Sound alert (zones/lines) ---
-        frame_alert = tk.LabelFrame(left, text="Sound alert"); frame_alert.pack(fill="x", padx=0, pady=6)
-
-        v_a_en    = tk.BooleanVar(value=bool(base.get("alert_enabled", False)))
-        v_a_freeS = tk.IntVar(value=int(base.get("alert_freeze_s", 2)))
-        v_a_where = tk.IntVar(value=int(base.get("alert_zone_inside", 1)))  # 1=inside, 0=outside
-        v_a_sound = tk.StringVar(value=str(base.get("alert_sound", "")))
-        v_a_loop  = tk.BooleanVar(value=bool(base.get("alert_loop", True)))
-
-        r1 = tk.Frame(frame_alert); r1.pack(fill="x", padx=6, pady=2)
-        cb_a_en = tk.Checkbutton(r1, text="Enable alert (uses selected classes)", variable=v_a_en); cb_a_en.pack(side="left", padx=(0,8)); attach_help(cb_a_en, "alert_enabled")
-
-        r2 = tk.Frame(frame_alert); r2.pack(fill="x", padx=6, pady=2)
-        tk.Label(r2, text="Sound file:", width=12, anchor="w").pack(side="left")
-        ent_a_path = tk.Entry(r2, textvariable=v_a_sound, width=36); ent_a_path.pack(side="left", padx=(3, 6)); attach_help(ent_a_path, "alert_sound")
-        def _pick_sound():
-            initdir = str(DEFAULT_SOUNDS_DIR if DEFAULT_SOUNDS_DIR.exists() else PROJECT_ROOT)
-            fpath = filedialog.askopenfilename(initialdir=initdir, title="Choose alert sound (wav/mp3)",
-                                               filetypes=[("Audio","*.wav *.mp3 *.ogg *.flac *.m4a"), ("All","*.*")])
-            if fpath: v_a_sound.set(fpath)
-        tk.Button(r2, text="Browse…", command=_pick_sound).pack(side="left")
-        # ▶ Test sound button — plays the currently selected file once
-        tk.Button(r2, text="Test sound ▶", command=lambda: self._play_test_sound(v_a_sound.get())).pack(side="left", padx=(8,0))
-
-        r3 = tk.Frame(frame_alert); r3.pack(fill="x", padx=6, pady=2)
-        cb_loop = tk.Checkbutton(r3, text="Loop while active", variable=v_a_loop); cb_loop.pack(side="left", padx=(0,12)); attach_help(cb_loop, "alert_loop")
-        tk.Label(r3, text="freeze (s):").pack(side="left")
-        sp_a_free = tk.Spinbox(r3, from_=0, to=60, width=5, textvariable=v_a_freeS); sp_a_free.pack(side="left", padx=(3, 6)); attach_help(sp_a_free, "alert_freeze_s")
-
-        r4 = tk.Frame(frame_alert); r4.pack(fill="x", padx=6, pady=(6,4))
-        tk.Label(r4, text="Mode:", width=8, anchor="w").pack(side="left")
-        rb_in  = tk.Radiobutton(r4, text="inside zone",  variable=v_a_where, value=1); rb_in.pack(side="left", padx=(3,12)); attach_help(rb_in, "alert_zone_inside")
-        rb_out = tk.Radiobutton(r4, text="outside zone", variable=v_a_where, value=0); rb_out.pack(side="left", padx=(3,2)); attach_help(rb_out, "alert_zone_inside")
-
-        # ---- read/write fields ----
-        def _collect() -> dict:
-            cur = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
-            def _get(var, cast, key, dflt):
-                s = var.get().strip()
-                if s == "": return cur.get(key, dflt)
-                try: return cast(s)
-                except Exception: return dflt
-            return {
-                "imgsz": _get(v_imgsz, int,   "imgsz",        640),
-                "conf":  _get(v_conf,  float, "conf",         0.5),
-                "iou":   _get(v_iou,   float, "iou",          0.6),
-                "frame_skip":   _get(v_skip,  int,   "frame_skip",   1),
-                "track_buffer": _get(v_buf,   int,   "track_buffer", 60),
-                "match_thresh": _get(v_match, float, "match_thresh", 0.78),
-                "min_hits":     _get(v_hits,  int,   "min_hits",     2),
-                "line_min_gap": int(v_lgap.get().strip() or LINE_MIN_GAP_FRAMES_DEFAULT),
-                "line_min_sep": int(v_lsep.get().strip() or LINE_MIN_SEP_PX_DEFAULT),
-                "zone_min_gap": int(v_zhgap.get().strip() or ZONE_MIN_GAP_FRAMES_DEFAULT),
-                "preview_enabled": bool(v_prev.get()),
-                "trace_enabled": bool(v_trace.get()),
-                "trace_len": int(v_tlen.get()),
-                "anchor_mode": v_anch.get(),
-                "ghost_margin": int(v_ghost.get()),
-                "trace_color": v_tcolor.get().strip(),
-                "trace_thickness": int(v_tth.get()),
-                "overlay_frame_color": v_fcolor.get().strip(),
-                "overlay_frame_thickness": int(v_fth.get()),
-                # Sound (uses selected classes)
-                "alert_enabled": bool(v_a_en.get()),
-                "alert_sound": v_a_sound.get().strip(),
-                "alert_loop": bool(v_a_loop.get()),
-                "alert_freeze_s": int(v_a_freeS.get()),
-                "alert_zone_inside": int(v_a_where.get()),
-            }
-
-        def _apply():
-            try:
-                params = _collect()
-                self.adv_params = params
-                self.advanced_override = True
-                # sync with fields used in run()
-                self.preview_enabled.set(params["preview_enabled"])
-                self.trace_enabled.set(params["trace_enabled"])
-                self.trace_len.set(params["trace_len"])
-                self.anchor_mode.set(params["anchor_mode"])
-                self.ghost_margin.set(params["ghost_margin"])
-                self.alert_enabled.set(params["alert_enabled"])
-                self.alert_sound.set(params["alert_sound"])
-                self.alert_loop.set(params["alert_loop"])
-                self.alert_freeze_s.set(params["alert_freeze_s"])
-                self._log("[ADV] Applied override (from fields).")
-                win.destroy()
-            except Exception as e:
-                messagebox.showerror("Adv", str(e))
-
-        def _reset():
-            self.advanced_override = False
-            self._log("[ADV] Restored preset from quality slider.")
-            win.destroy()
-
-        btns = tk.Frame(left); btns.pack(fill="x", pady=10)
-        tk.Button(btns, text="Apply", command=_apply).pack(side="left", padx=6)
-        tk.Button(btns, text="Restore preset from slider", command=_reset).pack(side="left", padx=6)
+        win.lift(); win.focus_force()
+        # Build the whole panel inside this window (free function call)
+        frame = build_advanced_settings(win, self)
+        frame.pack(fill="both", expand=True, padx=8, pady=8)
 
     # ========== START / ABORT ==========
     def abort(self):
@@ -839,173 +524,11 @@ class App(AppUIMixin, tk.Tk):
         return f"{m:02d}:{s:02d}"
 
 
-    # ========== PREVIEW window ==========
-    def _ensure_preview_window(self):
-        """Create/activate the LIVE preview window.
-        Closing the window (X) or pressing ESC == pressing the ABORT button.
-        The window is raised and focused so ESC works immediately.
-        """
-        if self._preview_is_suppressed():
-            return
-
-        def _abort_from_preview(_evt=None):
-            try:
-                # prevent re-creation during the next frames/resize events
-                self._preview_suppress(500)
-                self._destroy_preview_window()
-                self.abort()
-            except Exception:
-                try:
-                    self._destroy_preview_window()
-                except Exception:
-                    pass
-
-        # If it already exists, just raise & focus it
-        if getattr(self, "_preview_win", None) and self._preview_win.winfo_exists():
-            try:
-                w = self._preview_win
-                w.deiconify()
-                w.lift()
-                w.focus_force()
-                if getattr(self, "_preview_lbl", None):
-                    self._preview_lbl.focus_set()
-                # bring-to-front bump without staying always-on-top
-                w.attributes("-topmost", True)
-                w.after(250, lambda: w.attributes("-topmost", False))
-            except Exception:
-                pass
-            return
-
-        # Create new window
-        win = tk.Toplevel(self)
-        win.title("Preview (LIVE)")
-        win.geometry("960x620")
-
-        # Close (X) or Esc -> ABORT
-        win.protocol("WM_DELETE_WINDOW", _abort_from_preview)
-        win.bind("<Escape>", _abort_from_preview)
-        win.bind("<Control-w>", _abort_from_preview)
-
-        lbl = tk.Label(win, anchor="center", bg="#111")
-        lbl.pack(fill="both", expand=True)
-
-        self._preview_win = win
-        self._preview_lbl = lbl
-        self._preview_last_bgr = None
-        self._preview_after_id = None
-
-        # Redraw on window resize so scaling follows the window
-        win.bind("<Configure>", self._on_preview_resize)
-
-        # Raise & focus so Esc works right away
-        try:
-            win.update_idletasks()
-            win.deiconify()
-            win.lift()
-            win.focus_force()
-            lbl.focus_set()
-            win.attributes("-topmost", True)
-            win.after(250, lambda: win.attributes("-topmost", False))
-        except Exception:
-            pass
-
-
-
-
-    def _show_preview_bgr(self, frame_bgr):
-        if not self.preview_enabled.get() or self._preview_is_suppressed():
-            return
-
-        def _do():
-            try:
-                # Only update if the window exists; do NOT auto-create while suppressed
-                if not (getattr(self, "_preview_win", None) and self._preview_win.winfo_exists()):
-                    self._ensure_preview_window()
-                    if not (getattr(self, "_preview_win", None) and self._preview_win.winfo_exists()):
-                        return
-
-                win = self._preview_win
-                lbl = self._preview_lbl
-
-                # Cache last frame so we can redraw on window resize
-                self._preview_last_bgr = frame_bgr
-
-                # Target area: ~90% of current window client size (keep aspect ratio)
-                win.update_idletasks()
-                tw = max(100, win.winfo_width()  - 12)
-                th = max(100, win.winfo_height() - 12)
-                target_w = int(tw * 0.90)
-                target_h = int(th * 0.90)
-
-                H, W = frame_bgr.shape[:2]
-                scale = min(target_w / float(W), target_h / float(H))
-                nw = max(1, int(W * scale))
-                nh = max(1, int(H * scale))
-
-                interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
-                disp = cv2.resize(frame_bgr, (nw, nh), interpolation=interp)
-                rgb  = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
-
-                from PIL import Image, ImageTk
-                imgtk = ImageTk.PhotoImage(Image.fromarray(rgb))
-                self._preview_imgtk = imgtk  # keep reference
-                lbl.config(image=imgtk)
-            except Exception:
-                pass
-
-        try:
-            # keep only one pending update; cancel older one if any
-            if getattr(self, "_preview_after_id", None):
-                try: self.after_cancel(self._preview_after_id)
-                except Exception: pass
-                self._preview_after_id = None
-            self._preview_after_id = self.after(0, _do)
-        except Exception:
-            pass
-
-
-
-    def _on_preview_resize(self, _evt=None):
-        """Redraw last frame when the preview window changes size."""
-        try:
-            if self._preview_is_suppressed():
-                return
-            if getattr(self, "_preview_last_bgr", None) is not None and \
-               getattr(self, "_preview_win", None) and self._preview_win.winfo_exists():
-                # Reuse the last frame; _show_preview_bgr will rescale to new size
-                self._show_preview_bgr(self._preview_last_bgr)
-        except Exception:
-            pass
-
-
-    def _destroy_preview_window(self):
-        """Cancel timers, unbind, and destroy preview window safely."""
-        try:
-            if getattr(self, "_preview_after_id", None):
-                try: self.after_cancel(self._preview_after_id)
-                except Exception: pass
-                self._preview_after_id = None
-
-            win = getattr(self, "_preview_win", None)
-            if win:
-                try: win.unbind("<Configure>")
-                except Exception: pass
-                try:
-                    if win.winfo_exists():
-                        win.destroy()
-                except Exception:
-                    pass
-        finally:
-            self._preview_win = None
-            self._preview_lbl = None
-            self._preview_last_bgr = None
-
-
 # ---- robust entrypoint with on-screen + file logging of startup errors ----
 def _safe_main():
     import traceback, tkinter as _tk
     from pathlib import Path as _P
-    from paths import OUTPUTS as _LOG_DIR   # dodaj u góry funkcji lub modułu
+    from paths import OUTPUTS as _LOG_DIR
     log_dir = _LOG_DIR
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -1017,16 +540,13 @@ def _safe_main():
         app = App()
         app.mainloop()
     except Exception:
-        # 1) dump full traceback to console
         traceback.print_exc()
-        # 2) save to output/ui_error.log
         try:
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write("\n" + "="*60 + "\nFATAL UI ERROR\n")
                 f.write(traceback.format_exc())
         except Exception:
             pass
-        # 3) also show a Tk messagebox so you see it if console closes
         try:
             _r = _tk.Tk(); _r.withdraw()
             from tkinter import messagebox as _mb
