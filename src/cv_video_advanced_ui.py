@@ -91,6 +91,7 @@ HELP = {
     "alert_loop": "Loop sound while active (on) or play ping with cooldown (off).",
     "alert_freeze_s": "Cooldown between pings in seconds (used when looping is off).",
     "alert_zone_inside": "Alert condition: inside (1) vs outside (0) the zone.",
+    "hud_scale": "Size of the bottom-right HUD panel relative to auto scaling. 100% = default.",
 }
 
 def _bind_help(widget: tk.Widget, key: str, help_label: tk.Label):
@@ -101,7 +102,9 @@ def _bind_help(widget: tk.Widget, key: str, help_label: tk.Label):
 # ───────────────────── main builder ─────────────────────
 def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     """
-    Build the full 'Advanced options' panel with vertical rows and contextual help.
+    Build Advanced dialog as a Notebook with tabs:
+      • Main  – existing options
+      • Extras – future features; includes HUD size control now
     """
     if not hasattr(app, "adv_params"):
         app.adv_params = {}
@@ -116,7 +119,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         "match_thresh": p.get("match_thresh", 0.8),
         "min_hits": p.get("min_hits", 2),
         "line_min_gap": p.get("line_min_gap", 8),
-        "line_min_sep": p.get("line_min_sep", 12),  # runner uses this key
+        "line_min_sep": p.get("line_min_sep", 12),
         "zone_min_gap": p.get("zone_min_gap", 6),
         "live_preview": p.get("live_preview", True),
         "trace_enabled": p.get("trace_enabled", True),
@@ -132,6 +135,8 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         "alert_loop": p.get("alert_loop", True),
         "alert_freeze_s": p.get("alert_freeze_s", 2),
         "alert_zone_inside": p.get("alert_zone_inside", 1),
+        # NEW:
+        "hud_scale": float(p.get("hud_scale", 1.0)),  # 1.0 = 100%
     }
 
     # tk variables (re-use if present)
@@ -142,6 +147,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         setattr(app, name, v)
         return v
 
+    # Main vars
     v_imgsz        = _ensure("v_imgsz", tk.StringVar, str(defaults["imgsz"]))
     v_conf         = _ensure("v_conf", tk.StringVar, str(defaults["conf"]))
     v_iou          = _ensure("v_iou", tk.StringVar, str(defaults["iou"]))
@@ -170,11 +176,17 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     v_alert_freeze = _ensure("alert_freeze_s", tk.IntVar, int(defaults["alert_freeze_s"]))
     v_alert_inside = _ensure("alert_inside", tk.IntVar, int(defaults["alert_zone_inside"]))
 
-    # ───────── layout: left controls, right help ─────────
-    root = ttk.Frame(parent)
+    # Extras vars
+    v_hud_scale    = _ensure("v_hud_scale", tk.StringVar, str(int(round(float(defaults["hud_scale"]) * 100))))
 
-    left = ttk.Frame(root);  left.pack(side="left", fill="both", expand=True)
-    right = ttk.LabelFrame(root, text="Help"); right.pack(side="left", fill="both", expand=True, padx=(8, 0))
+    # Notebook
+    nb = ttk.Notebook(parent)
+
+    # =========== Main tab ===========
+    main = ttk.Frame(nb); nb.add(main, text="Main")
+
+    left = ttk.Frame(main);  left.pack(side="left", fill="both", expand=True)
+    right = ttk.LabelFrame(main, text="Help"); right.pack(side="left", fill="both", expand=True, padx=(8, 0))
     help_lbl = tk.Label(right, text="Focus a field to see help.", justify="left", anchor="nw", wraplength=420)
     help_lbl.pack(fill="both", expand=True, padx=8, pady=8)
 
@@ -300,7 +312,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         return box
     _row(lf, "", _mode_row)
 
-    # ───────── helper to collect current values ─────────
+    # Buttons (Apply / Restore / Save / Load)
     def _collect() -> dict:
         return {
             "imgsz": _int(v_imgsz, defaults["imgsz"]),
@@ -327,12 +339,11 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
             "alert_loop": bool(v_alert_loop.get()),
             "alert_freeze_s": _int(v_alert_freeze, defaults["alert_freeze_s"]),
             "alert_zone_inside": _int(v_alert_inside, defaults["alert_zone_inside"]),
-            "_meta": {"version": 1, "saved_at": datetime.now().isoformat(timespec="seconds")},
+            "hud_scale": max(0.5, min(2.0, _int(v_hud_scale, 100) / 100.0)),
+            "_meta": {"version": 2, "saved_at": datetime.now().isoformat(timespec="seconds")},
         }
 
-    # Apply & Restore + Save/Load
     bar = ttk.Frame(left); bar.pack(fill="x", padx=6, pady=(0, 8))
-
     def _apply():
         app.adv_params.update(_collect())
         messagebox.showinfo("Advanced options", "Saved. Values are now active for the next run.")
@@ -345,7 +356,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     ttk.Button(bar, text="Restore preset from slider", command=_restore).pack(side="left", padx=(8, 0))
 
     def _save_preset():
-        data = _collect()  # capture current UI values (even if Apply not pressed)
+        data = _collect()
         initialdir = str(_presets_dir())
         fname = f"adv_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         path = filedialog.asksaveasfilename(
@@ -381,7 +392,6 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
             messagebox.showerror("Preset", f"Could not read file:\n{e}")
             return
 
-        # tolerate older/newer keys
         def _getk(*names, default=None):
             for n in names:
                 if n in d: return d[n]
@@ -415,9 +425,30 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         v_alert_freeze.set(int(_getk("alert_freeze_s", default=defaults["alert_freeze_s"])))
         v_alert_inside.set(int(_getk("alert_zone_inside", default=defaults["alert_zone_inside"])))
 
+        v_hud_scale.set(str(int(round(float(_getk("hud_scale", default=defaults["hud_scale"])) * 100))))
+
         # auto-apply so it's active
         app.adv_params.update(_collect())
         messagebox.showinfo("Preset", f"Loaded and applied:\n{path}")
     ttk.Button(bar, text="Load preset…", command=_load_preset).pack(side="left", padx=(8, 0))
 
-    return root
+    # =========== Extras tab ===========
+    extras = ttk.Frame(nb); nb.add(extras, text="Extras")
+
+    ex_left = ttk.LabelFrame(extras, text="HUD / Stats / Heatmaps"); ex_left.pack(fill="x", padx=6, pady=6)
+
+    def _hud_row(fr):
+        box = ttk.Frame(fr)
+        ttk.Label(box, text="HUD size (%)").pack(side="left")
+        sp = ttk.Spinbox(box, from_=50, to=200, increment=5, textvariable=v_hud_scale, width=6)
+        sp.pack(side="left", padx=(6, 6))
+        return box
+    _row(ex_left, "", _hud_row)
+
+    # placeholders for future options
+    ph = ttk.Frame(ex_left); ph.pack(fill="x", padx=6, pady=(6, 2))
+    ttk.Checkbutton(ph, text="[soon] Movement heatmap", state="disabled").pack(anchor="w")
+    ttk.Checkbutton(ph, text="[soon] Dwell-time heatmap", state="disabled").pack(anchor="w")
+    ttk.Checkbutton(ph, text="[soon] Save tracks CSV", state="disabled").pack(anchor="w")
+
+    return nb
