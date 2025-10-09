@@ -54,7 +54,7 @@ class App(AppUIMixin, tk.Tk):
         self.geometry("980x720")
 
         # --- GUI variables (with better defaults) ---
-        self.input_dir = tk.StringVar(value=str(DEFAULT_IN_DIR) if DEFAULT_IN_DIR.exists() else "")
+        self.input_dir = tk.StringVar(value="")
         self.output_dir = tk.StringVar(value=str(DEFAULT_OUT_DIR))
         models_default = DEFAULT_MODELS_DIR
         self.weights_path = tk.StringVar(value=str(find_best_weights(models_default) or models_default))
