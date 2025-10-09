@@ -1,10 +1,19 @@
-# cv_video_advanced_ui.py — Advanced settings UI (restored layout with help)
+# cv_video_advanced_ui.py — Advanced settings UI (fixed help width, grouped extras, tab styling)
 from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 import json
 from datetime import datetime
+
+# use project sound player for consistent behavior
+try:
+    from cv_video_sound import SoundPlayer
+except Exception:
+    SoundPlayer = None  # guarded use
+
+# ───────────────────── constants ─────────────────────
+HELP_WIDTH = 420   # fixed help panel width (prevents left/right "jumping")
 
 # ───────────────────── path helpers ─────────────────────
 def _get_project_root() -> Path:
@@ -39,56 +48,100 @@ def _str(var, default="") -> str:
 
 # ───────────────────── UI helpers ─────────────────────
 def _row(parent, label_text: str, build_widget) -> tuple[ttk.Frame, tk.Widget]:
-    """Horizontal row: left label + widget built by build_widget(frame)."""
     fr = ttk.Frame(parent)
     ttk.Label(fr, text=label_text, width=22, anchor="w").pack(side="left")
     w = build_widget(fr)
     try:
-        if isinstance(w, tk.Widget):
-            w.pack(side="left")
+        if isinstance(w, tk.Widget): w.pack(side="left")
     except Exception:
         pass
     fr.pack(fill="x", padx=6, pady=(2, 2))
     return fr, w
 
-def _browse_sound(parent, var):
+def _browse_sound(var):
     path = filedialog.askopenfilename(
         title="Choose alert sound",
         initialdir=str(_sounds_dir()),
         filetypes=[("Audio", "*.wav;*.mp3;*.ogg;*.flac;*.aac;*.m4a"), ("All files", "*.*")]
     )
-    if path:
-        var.set(path)
+    if path: var.set(path)
+
+def _make_scrollable(parent: tk.Misc) -> ttk.Frame:
+    """Return an interior frame that is vertically scrollable."""
+    container = ttk.Frame(parent)
+    canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0)
+    vsb = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=vsb.set)
+
+    interior = ttk.Frame(canvas)
+    win_id = canvas.create_window((0, 0), window=interior, anchor="nw")
+
+    def _on_config(_=None):
+        canvas.configure(scrollregion=canvas.bbox("all"))
+        canvas.itemconfigure(win_id, width=canvas.winfo_width())
+
+    interior.bind("<Configure>", _on_config)
+    canvas.bind("<Configure>", _on_config)
+
+    # mouse wheel
+    def _on_wheel(e):
+        canvas.yview_scroll(int(-1*(e.delta/120)), "units")
+    canvas.bind_all("<MouseWheel>", _on_wheel)
+
+    canvas.pack(side="left", fill="both", expand=True)
+    vsb.pack(side="right", fill="y")
+    container.pack(fill="both", expand=True)
+    return interior
+
+def _make_help_panel(parent: tk.Misc, title="Help", width=HELP_WIDTH):
+    """Fixed-width help panel with wrapped label (no size jitter)."""
+    fr = ttk.LabelFrame(parent, text=title)
+    fr.pack_propagate(False)  # keep fixed width
+    fr.config(width=width)
+    lbl = tk.Label(fr, text="Focus a field to see help.", justify="left", anchor="nw")
+    lbl.pack(fill="both", expand=True, padx=8, pady=8)
+    # fixed wrap to the help frame width
+    lbl.config(wraplength=max(50, width - 16))
+    return fr, lbl
 
 # ───────────────────── contextual help ─────────────────────
 HELP = {
-    "imgsz": "Network input size (pixels). Lower = faster; higher catches smaller objects. 320–640 typical.",
-    "conf": "Detection confidence threshold. Detections below this score are ignored.",
-    "iou": "IoU threshold for NMS (merging overlapping boxes). Higher keeps more overlaps.",
-    "frame_skip": "Process every Nth frame (0 = every frame). Higher = faster, lower temporal detail.",
-    "track_buffer": "How long a lost track is kept (frames). Helps maintain IDs across brief occlusions.",
-    "match_thresh": "Tracker association threshold. Higher = stricter matching between frames.",
-    "min_hits": "Frames required before a new track is trusted. Filters short flickers.",
-    "line_min_gap": "Debounce for line counts (frames) per object to prevent double counting.",
-    "line_min_sep": "Minimal pixel travel between two line events per object.",
-    "zone_min_gap": "Debounce for entering/leaving zones (frames) per object.",
-    "live_preview": "Show a live preview window during processing.",
-    "trace_enabled": "Draw trails of recent object movement.",
-    "trace_len": "Number of points kept in each trail.",
+    # Detection / tracking
+    "imgsz": "Image size for the AI. Bigger = better detail but slower. Try 320–640 on CPU; 960–1280 only for tiny/far objects.",
+    "conf": "Confidence threshold. Higher = stricter (fewer false alarms, more misses). Start around 0.50–0.60.",
+    "iou": "Overlap used to merge duplicate boxes. Higher merges more; lower keeps more boxes.",
+    "frame_skip": "Process every Nth frame. 0 = every frame (best quality, slowest). +1 or +2 speeds up but can miss fast motion.",
+    "track_buffer": "How long (frames) an ID is kept after it disappears. Higher survives short occlusions; too high may leave ghosts.",
+    "match_thresh": "How strict the tracker is when matching boxes to existing IDs. Higher = stricter (fewer mismatches, more resets).",
+    "min_hits": "Frames required before a new track is confirmed. Flicker? raise. Delayed IDs? lower.",
+    "line_min_gap": "Min frames between two line counts for the same object (anti-bounce).",
+    "line_min_sep": "Min movement across the line (px) before counting again. Sliding along the line? raise this.",
+    "zone_min_gap": "Min frames between zone IN/OUT for the same object. Border toggling? raise this.",
+
+    # Overlay / trace / anchor
+    "live_preview": "Show the processed video while running. Turn off to save CPU.",
     "overlay_mode": "centroid = dots; box = rectangles; box+conf = rectangles with score.",
-    "anchor_mode": "Which point is used for counters: center or bottom edge (feet on ground).",
-    "ghost_margin": "If anchor is bottom, shift it upward by this many pixels (avoid border touches).",
-    "trace_color": "Trail color. ‘auto’ = per-track. Also accepts #RRGGBB or B,G,R.",
-    "trace_thickness": "Trail line thickness (pixels).",
-    "overlay_frame_color": "Color of lines/zones. ‘auto’ = default orange.",
+    "trace_enabled": "Draw a tail behind each tracked object.",
+    "trace_len": "How many recent points to keep per tail.",
+    "anchor_mode": "Point used for counting & trails: bottom (feet/wheels) or center.",
+    "ghost_margin": "Only for bottom anchor: lift the point above the box edge to avoid border/line bounces.",
+
+    # Colors / thickness
+    "trace_color": "Use 'auto', a #RRGGBB value (e.g. #00FF88), or B,G,R (e.g. 255,200,0).",
+    "trace_thickness": "Tail thickness in pixels.",
+    "overlay_frame_color": "Color for lines & zone outlines. Same formats as trace color.",
     "overlay_frame_thickness": "Line/zone thickness (pixels).",
-    "alert_enabled": "Play a sound when selected classes are inside/outside the zone.",
-    "alert_sound": "Audio file to play (.wav/.mp3/…).",
-    "alert_loop": "Loop sound while active (on) or play ping with cooldown (off).",
-    "alert_freeze_s": "Cooldown between pings in seconds (used when looping is off).",
-    "alert_zone_inside": "Alert condition: inside (1) vs outside (0) the zone.",
-    "hud_scale": "Size of the bottom-right HUD panel relative to auto scaling. 100% = default.",
-    "snapshot_on_events": "Save an annotated frame whenever a line/zone event is registered.",
+
+    # Alert
+    "alert_enabled": "Play a sound when the condition below is met for selected classes.",
+    "alert_sound": "Audio file to play. Use Play to test.",
+    "alert_loop": "Loop while condition holds (on) or play single pings with cooldown (off).",
+    "alert_freeze_s": "Cooldown between pings (only when looping is off).",
+    "alert_zone_inside": "Alert when an object is inside the zone (1) or outside (0).",
+
+    # Extras
+    "hud_scale": "Size of the bottom-right HUD panel. 100% = default.",
+    "snapshot_on_events": "Save an annotated snapshot on every line/zone event.",
 }
 
 def _bind_help(widget: tk.Widget, key: str, help_label: tk.Label):
@@ -99,46 +152,39 @@ def _bind_help(widget: tk.Widget, key: str, help_label: tk.Label):
 # ───────────────────── main builder ─────────────────────
 def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     """
-    Restored layout:
-      • Main  – Detection/Tracking/Hysteresis; Overlay/Trace/Anchor/Ghost; Colors/Thickness; Sound alert
-      • Extras – HUD size + Snapshot-on-events
+    Layout:
+      • Notebook with Main + Extras (both have fixed-width Help panel)
+      • Bottom action bar (Apply / Save / Load / Close) always visible
     """
     if not hasattr(app, "adv_params"):
         app.adv_params = {}
     p = app.adv_params
 
-    # defaults
+    # ttk style: make tabs a bit taller/more visible
+    try:
+        style = ttk.Style(parent)
+        style.configure("Adv.TNotebook.Tab", padding=(16, 8))  # bigger tabs
+        style.configure("Adv.TNotebook", tabmargins=(8, 4, 8, 0))
+    except Exception:
+        style = None
+
+    # defaults snapshot
     defaults = {
-        "imgsz": p.get("imgsz", 320),
-        "conf": p.get("conf", 0.5),
-        "iou": p.get("iou", 0.6),
-        "frame_skip": p.get("frame_skip", 2),
-        "track_buffer": p.get("track_buffer", 5),
-        "match_thresh": p.get("match_thresh", 0.8),
-        "min_hits": p.get("min_hits", 2),
-        "line_min_gap": p.get("line_min_gap", 8),
-        "line_min_sep": p.get("line_min_sep", 12),
+        "imgsz": p.get("imgsz", 320), "conf": p.get("conf", 0.5), "iou": p.get("iou", 0.6),
+        "frame_skip": p.get("frame_skip", 2), "track_buffer": p.get("track_buffer", 5),
+        "match_thresh": p.get("match_thresh", 0.8), "min_hits": p.get("min_hits", 2),
+        "line_min_gap": p.get("line_min_gap", 8), "line_min_sep": p.get("line_min_sep", 12),
         "zone_min_gap": p.get("zone_min_gap", 6),
-
         "live_preview": p.get("live_preview", True),
-        "trace_enabled": p.get("trace_enabled", True),
-        "trace_len": p.get("trace_len", 24),
-
+        "trace_enabled": p.get("trace_enabled", True), "trace_len": p.get("trace_len", 24),
         "overlay_mode": p.get("overlay_mode", "centroid"),
-        "anchor_mode": p.get("anchor_mode", "center"),
-        "ghost_margin": p.get("ghost_margin", 24),
-
-        "trace_color": p.get("trace_color", "auto"),
-        "trace_thickness": p.get("trace_thickness", 2),
+        "anchor_mode": p.get("anchor_mode", "center"), "ghost_margin": p.get("ghost_margin", 24),
+        "trace_color": p.get("trace_color", "auto"), "trace_thickness": p.get("trace_thickness", 2),
         "overlay_frame_color": p.get("overlay_frame_color", "auto"),
         "overlay_frame_thickness": p.get("overlay_frame_thickness", 2),
-
-        "alert_enabled": p.get("alert_enabled", False),
-        "alert_sound": p.get("alert_sound", ""),
-        "alert_loop": p.get("alert_loop", True),
-        "alert_freeze_s": p.get("alert_freeze_s", 2),
+        "alert_enabled": p.get("alert_enabled", False), "alert_sound": p.get("alert_sound", ""),
+        "alert_loop": p.get("alert_loop", True), "alert_freeze_s": p.get("alert_freeze_s", 2),
         "alert_zone_inside": p.get("alert_zone_inside", 1),
-
         "hud_scale": float(p.get("hud_scale", 1.0)),
         "snapshot_on_events": bool(p.get("snapshot_on_events", False)),
     }
@@ -147,9 +193,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     def _ensure(name, cls, value):
         if hasattr(app, name) and isinstance(getattr(app, name), cls):
             return getattr(app, name)
-        v = cls(value=value)
-        setattr(app, name, v)
-        return v
+        v = cls(value=value); setattr(app, name, v); return v
 
     # Detection / Tracking / Hysteresis vars
     v_imgsz        = _ensure("v_imgsz", tk.StringVar, str(defaults["imgsz"]))
@@ -165,7 +209,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
 
     # Overlay / Trace / Anchor / Ghost
     v_live_preview = _ensure("preview_enabled", tk.BooleanVar, bool(defaults["live_preview"]))
-    app.overlay_mode = _ensure("overlay_mode", tk.StringVar, str(defaults["overlay_mode"]))  # (new, but placed here)
+    app.overlay_mode = _ensure("overlay_mode", tk.StringVar, str(defaults["overlay_mode"]))
     app.anchor_mode  = _ensure("anchor_mode",  tk.StringVar, str(defaults["anchor_mode"]))
     app.ghost_margin = _ensure("ghost_margin", tk.StringVar, str(defaults["ghost_margin"]))
     app.trace_enabled= _ensure("trace_enabled", tk.BooleanVar, bool(defaults["trace_enabled"]))
@@ -184,19 +228,21 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     v_alert_inside     = _ensure("alert_inside", tk.IntVar, int(defaults["alert_zone_inside"]))
 
     # Extras
-    v_hud_scale        = _ensure("v_hud_scale", tk.StringVar, str(int(round(float(defaults["hud_scale"]) * 100))))
-    v_snapshot_events  = _ensure("snapshot_on_events", tk.BooleanVar, bool(defaults["snapshot_on_events"]))
+    v_hud_scale       = _ensure("v_hud_scale", tk.StringVar, str(int(round(float(defaults["hud_scale"]) * 100))))
+    v_snapshot_events = _ensure("snapshot_on_events", tk.BooleanVar, bool(defaults["snapshot_on_events"]))
 
-    # Notebook
-    nb = ttk.Notebook(parent)
+    # ────────────────── outer container: notebook + bottom bar ──────────────────
+    root = ttk.Frame(parent); root.pack(fill="both", expand=True)
+    nb_style = "Adv.TNotebook" if style else "TNotebook"
+    nb = ttk.Notebook(root, style=nb_style); nb.pack(side="top", fill="both", expand=True)
 
-    # =========== Main tab ===========
-    main = ttk.Frame(nb); nb.add(main, text="Main")
+    # === MAIN TAB (scrollable) ===
+    main_tab = ttk.Frame(nb); nb.add(main_tab, text="Main")
+    main = _make_scrollable(main_tab)
 
     left = ttk.Frame(main);  left.pack(side="left", fill="both", expand=True)
-    right = ttk.LabelFrame(main, text="Help"); right.pack(side="left", fill="both", expand=True, padx=(8, 0))
-    help_lbl = tk.Label(right, text="Focus a field to see help.", justify="left", anchor="nw", wraplength=420)
-    help_lbl.pack(fill="both", expand=True, padx=8, pady=8)
+    right, help_lbl = _make_help_panel(main, title="Help", width=HELP_WIDTH)
+    right.pack(side="left", fill="y", padx=(8, 0))  # fixed-width help panel
 
     # Detection / Tracking / Hysteresis
     lf = ttk.LabelFrame(left, text="Detection / Tracking / Hysteresis"); lf.pack(fill="x", padx=6, pady=(6, 4))
@@ -215,7 +261,6 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     lf = ttk.LabelFrame(left, text="Overlay / Trace / Anchor / Ghost"); lf.pack(fill="x", padx=6, pady=(4, 4))
     _, cb = _row(lf, "", lambda fr: ttk.Checkbutton(fr, text="Enable LIVE preview", variable=v_live_preview)); _bind_help(cb, "live_preview", help_lbl)
 
-    # Overlay mode (added here but keeps layout)
     def _overlay_row(fr):
         box = ttk.Frame(fr)
         ttk.Label(box, text="Overlay mode:").pack(side="left")
@@ -250,7 +295,6 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
 
     # Colors/Thickness (overlay)
     lf = ttk.LabelFrame(left, text="Colors/Thickness (overlay)"); lf.pack(fill="x", padx=6, pady=(4, 4))
-
     def _trace_color_row(fr):
         box = ttk.Frame(fr)
         ttk.Label(box, text="Trace color (auto/#RRGGBB/B,G,R)").pack(side="left")
@@ -285,15 +329,33 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
 
     # Sound alert (zones)
     lf = ttk.LabelFrame(left, text="Sound alert (zones)"); lf.pack(fill="x", padx=6, pady=(4, 6))
-
     _, cb = _row(lf, "", lambda fr: ttk.Checkbutton(fr, text="Enable alert (uses selected classes)", variable=app.alert_enabled))
     _bind_help(cb, "alert_enabled", help_lbl)
+
+    sound_player_ref = {"player": None}
+    def _play_sound():
+        if not SoundPlayer:
+            messagebox.showwarning("Sound", "Sound player not available in this build."); return
+        path = (app.alert_sound.get() or "").strip()
+        if not path:
+            messagebox.showwarning("Sound", "Please choose a sound file first."); return
+        try:
+            sound_player_ref["player"] = SoundPlayer(path)
+            sound_player_ref["player"].play_once()
+        except Exception as e:
+            messagebox.showerror("Sound", f"Could not play:\n{e}")
+    def _stop_sound():
+        try:
+            if sound_player_ref["player"]: sound_player_ref["player"].stop()
+        except Exception: pass
 
     def _sound_row(fr):
         box = ttk.Frame(fr)
         ttk.Label(box, text="Sound file:").pack(side="left")
         e = ttk.Entry(box, textvariable=app.alert_sound, width=42); e.pack(side="left", padx=(6, 6), fill="x", expand=True)
-        ttk.Button(box, text="Browse…", command=lambda: _browse_sound(lf, app.alert_sound)).pack(side="left", padx=(0, 6))
+        ttk.Button(box, text="Browse…", command=lambda: _browse_sound(app.alert_sound)).pack(side="left", padx=(0, 6))
+        ttk.Button(box, text="Play", command=_play_sound).pack(side="left")
+        ttk.Button(box, text="Stop", command=_stop_sound).pack(side="left", padx=(4, 0))
         _bind_help(e, "alert_sound", help_lbl)
         return box
     _row(lf, "", _sound_row)
@@ -317,7 +379,27 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         return box
     _row(lf, "", _mode_row)
 
-    # Buttons (Apply / Save / Load)
+    # === EXTRAS TAB (scrollable + help) ===
+    extras_tab = ttk.Frame(nb); nb.add(extras_tab, text="Extras")
+    extras = _make_scrollable(extras_tab)
+
+    ex_left = ttk.Frame(extras); ex_left.pack(side="left", fill="both", expand=True)
+    ex_right, ex_help_lbl = _make_help_panel(extras, title="Help", width=HELP_WIDTH)
+    ex_right.pack(side="left", fill="y", padx=(8, 0))
+
+    # HUD group
+    ex_hud = ttk.LabelFrame(ex_left, text="HUD"); ex_hud.pack(fill="x", padx=6, pady=(6, 4))
+    def _hud_spin(fr):
+        return ttk.Spinbox(fr, from_=50, to=200, increment=5, textvariable=v_hud_scale, width=6)
+    _, e = _row(ex_hud, "HUD size (%)", _hud_spin); _bind_help(e, "hud_scale", ex_help_lbl)
+
+    # Snapshots group
+    ex_snap = ttk.LabelFrame(ex_left, text="Snapshots"); ex_snap.pack(fill="x", padx=6, pady=(4, 6))
+    def _snap_row(fr):
+        return ttk.Checkbutton(fr, text="Save snapshot on events", variable=v_snapshot_events)
+    _, cb = _row(ex_snap, "", _snap_row); _bind_help(cb, "snapshot_on_events", ex_help_lbl)
+
+    # ────────────────── bottom action bar (outside tabs) ──────────────────
     def _collect() -> dict:
         return {
             # Detection/Tracking/Hysteresis
@@ -351,13 +433,13 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
             # Extras
             "hud_scale": max(0.5, min(2.0, _int(v_hud_scale, 100) / 100.0)),
             "snapshot_on_events": bool(v_snapshot_events.get()),
-            "_meta": {"version": 3, "saved_at": datetime.now().isoformat(timespec="seconds")},
+            "_meta": {"version": 6, "saved_at": datetime.now().isoformat(timespec="seconds")},
         }
 
-    bar = ttk.Frame(left); bar.pack(fill="x", padx=6, pady=(0, 8))
+    bar = ttk.Frame(root); bar.pack(side="bottom", fill="x", padx=8, pady=8)
+
     def _apply():
-        # silent apply (no popup)
-        app.adv_params.update(_collect())
+        app.adv_params.update(_collect())  # silent apply
     ttk.Button(bar, text="Apply", command=_apply).pack(side="left")
 
     def _save_preset():
@@ -366,15 +448,12 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         fname = f"adv_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         path = filedialog.asksaveasfilename(
             title="Save preset",
-            initialdir=initialdir,
-            defaultextension=".json",
-            initialfile=fname,
+            initialdir=initialdir, defaultextension=".json", initialfile=fname,
             filetypes=[("JSON preset", "*.json"), ("All files", "*.*")],
         )
         if not path: return
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            with open(path, "w", encoding="utf-8") as f: json.dump(data, f, indent=2)
         except Exception as e:
             messagebox.showerror("Preset", f"Could not save:\n{e}")
     ttk.Button(bar, text="Save preset…", command=_save_preset).pack(side="left", padx=(8, 0))
@@ -388,11 +467,9 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         )
         if not path: return
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                d = json.load(f)
+            with open(path, "r", encoding="utf-8") as f: d = json.load(f)
         except Exception as e:
-            messagebox.showerror("Preset", f"Could not read file:\n{e}")
-            return
+            messagebox.showerror("Preset", f"Could not read file:\n{e}"); return
 
         def _getk(*names, default=None):
             for n in names:
@@ -430,26 +507,16 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         v_hud_scale.set(str(int(round(float(_getk("hud_scale", default=defaults["hud_scale"])) * 100))))
         v_snapshot_events.set(bool(_getk("snapshot_on_events", default=defaults["snapshot_on_events"])))
 
-        # silent apply so it's active
-        app.adv_params.update(_collect())
+        app.adv_params.update(_collect())  # silent apply
+
     ttk.Button(bar, text="Load preset…", command=_load_preset).pack(side="left", padx=(8, 0))
 
-    # =========== Extras tab ===========
-    extras = ttk.Frame(nb); nb.add(extras, text="Extras")
+    def _close():
+        try:
+            if SoundPlayer and "player" in sound_player_ref and sound_player_ref["player"]:
+                sound_player_ref["player"].stop()
+        except Exception: pass
+        parent.winfo_toplevel().destroy()
+    ttk.Button(bar, text="Close", command=_close).pack(side="right")
 
-    ex_left = ttk.LabelFrame(extras, text="HUD / Stats / Extras"); ex_left.pack(fill="x", padx=6, pady=6)
-
-    def _hud_row(fr):
-        box = ttk.Frame(fr)
-        ttk.Label(box, text="HUD size (%)").pack(side="left")
-        sp = ttk.Spinbox(box, from_=50, to=200, increment=5, textvariable=v_hud_scale, width=6)
-        sp.pack(side="left", padx=(6, 6))
-        _bind_help(sp, "hud_scale", help_lbl)
-        return box
-    _row(ex_left, "", _hud_row)
-
-    # Snapshot toggle (placed after ex_left exists)
-    chk = ttk.Checkbutton(ex_left, text="Save snapshot on events", variable=v_snapshot_events)
-    chk.pack(anchor="w", padx=12, pady=(2, 2)); _bind_help(chk, "snapshot_on_events", help_lbl)
-
-    return nb
+    return root
