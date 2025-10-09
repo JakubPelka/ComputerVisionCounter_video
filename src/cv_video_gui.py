@@ -150,8 +150,14 @@ class CounterEditor(tk.Toplevel):
         if self.live:
             self._tick_live()
 
-        # ⟵ quality of life: open in “Add line” so clicks immediately place A then B
-        self.set_mode("line")
+        # Keep preview running; only pause when user selects a drawing tool
+        self.set_mode("idle")
+        if self.live:
+            self.hint.config(
+                text="LIVE — select “Add line”, “Add polyline”, or “Add zone” to pause and draw."
+            )
+        else:
+            self.hint.config(text="Mode: static frame")
 
     # ---------- Canvas init/resize ----------
     def _init_canvas_with_frame(self, frame_bgr: np.ndarray):
