@@ -45,12 +45,24 @@ class CounterEditor(tk.Toplevel):
                  live_cap: cv2.VideoCapture|None=None):
         super().__init__(master)
         self.title("Counter configuration (LIVE/STATIC)")
+        # make Cancel/ESC/X behave like ABORT
+        self.protocol("WM_DELETE_WINDOW", self.abort)
+        self.bind("<Escape>", self.abort)
+        self.transient(master)
+        try:
+            self.grab_set()  # modal
+        except Exception:
+            pass
 
         self.lines: list[dict] = []
         self.zones: list[dict] = []
         self.mode = tk.StringVar(value="idle")
         self.cur_points: list[list[float]] = []
         self.default_cfg_path = default_cfg_path
+
+        # cancel/return state
+        self._aborted = False
+        self.result: dict|None = None   # {"lines":[...], "zones":[...]}
 
         # LIVE state
         self.live_cap = live_cap
@@ -123,9 +135,6 @@ class CounterEditor(tk.Toplevel):
         note = tk.Label(self, text=rules, justify="left", anchor="e", fg="#666")
         note.pack(side="bottom", fill="x", padx=8, pady=(4, 8))
 
-
-
-
         self.hint = tk.Label(self, text="Mode: LIVE" if self.live else "Mode: static frame")
         self.hint.pack(fill="x")
 
@@ -192,7 +201,6 @@ class CounterEditor(tk.Toplevel):
             self.hint.config(text="Mode: idle" if not self.live else "LIVE")
         self._redraw_overlay_only()
 
-
     def _pause_live(self):
         if self._after_id is not None:
             try: self.after_cancel(self._after_id)
@@ -244,7 +252,6 @@ class CounterEditor(tk.Toplevel):
 
         self._redraw_overlay_only()
 
-
     def on_backspace(self, _):
         if self.cur_points:
             self.cur_points.pop(); self._redraw_overlay_only()
@@ -261,9 +268,8 @@ class CounterEditor(tk.Toplevel):
             self.hint.config(text="Zone added. (Resume LIVE with “Clear (resume LIVE)”)")
             self._redraw_overlay_only()
 
-
     def ask_name_and_add_line(self, a, b):
-        name = self._ask_name("Line name — first click=A, second=B (direction A→B):")
+        name = self._ask_name("Line name — first click=A, second=B (direction A->B):")
         if not name: return
         self.lines.append({"name": name, "a": [float(a[0]), float(a[1])], "b":[float(b[0]), float(b[1])]})
         self._redraw_overlay_only()
@@ -350,21 +356,28 @@ class CounterEditor(tk.Toplevel):
         name = self._ask_name("Polyline name — first point = A, last = B (direction A->B):")
         if not name: return
         self.lines.append({"name": name, "pts": [[float(x), float(y)] for x, y in pts]})
+        self._redraw_overlay_only()
 
-    def abort(self, *_evt):
-        """Abort without saving changes."""
+    # ----- ABORT / FINISH / MODAL -----
+    def abort(self, _evt=None):
+        """Cancel without saving; mark as aborted and close."""
         try:
-            # mark aborted if your caller checks it
-            setattr(self, "_aborted", True)
+            self._aborted = True
+            self.result = None
         except Exception:
             pass
+        # stop LIVE loop if any
+        if self._after_id is not None:
+            try: self.after_cancel(self._after_id)
+            except Exception: pass
+            self._after_id = None
         try:
             self.destroy()
         except Exception:
             pass
 
-
     def finish(self):
+        """Save (to default path if set), set result, close."""
         if self.default_cfg_path:
             try:
                 ensure_dir(self.default_cfg_path.parent)
@@ -377,8 +390,21 @@ class CounterEditor(tk.Toplevel):
             try: self.after_cancel(self._after_id)
             except Exception: pass
             self._after_id = None
+        # return value
+        self.result = {"lines": self.lines[:], "zones": self.zones[:]}
+        self._aborted = False
         self.destroy()
 
+    def run_modal(self):
+        """Block until closed; return (result_dict_or_None, aborted_bool)."""
+        try:
+            self.focus_force()
+        except Exception:
+            pass
+        self.wait_window(self)
+        return self.result, bool(self._aborted)
+
+    # ----- file io -----
     def load_dialog(self):
         f = filedialog.askopenfilename(title="Load configuration",
                                        filetypes=[("JSON","*.json"),("All","*.*")])
@@ -473,7 +499,6 @@ class AppUIMixin:
 
         self.classes_scroll = ScrollableFrame(lf)
         self.classes_scroll.pack(fill="both", expand=True)
-
 
         # Controls + progress
         bf = tk.Frame(frm); bf.pack(fill="x", pady=6)

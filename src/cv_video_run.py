@@ -290,13 +290,12 @@ def run(app, sources, outp: Path, selected_idx):
             start_perf = time.perf_counter()
             start_epoch = time.time()
 
-            # --- Counter editor ---
+            # --- Counter editor (modal) ---
             if is_stream:
                 base_stem = _re.sub(r'[^A-Za-z0-9_]+','_', src_name if isinstance(source, str) else f"cam_{source}")
                 default_cfg_path = cnt_dir / f"{base_stem}.json"
                 editor = CounterEditor(app, frame_bgr=None, default_cfg_path=default_cfg_path, live_cap=cap)
-                app.wait_window(editor)
-                lines_cfg = editor.lines[:]; zones_cfg = editor.zones[:]
+                result, aborted = editor.run_modal()
                 first_frame = None
             else:
                 ok, first_frame = cap.read()
@@ -306,8 +305,16 @@ def run(app, sources, outp: Path, selected_idx):
                 base_stem = (Path(src_name).stem if isinstance(source, (str,Path)) else f"cam_{source}")
                 default_cfg_path = cnt_dir / f"{base_stem}.json"
                 editor = CounterEditor(app, frame_bgr=first_frame, default_cfg_path=default_cfg_path, live_cap=None)
-                app.wait_window(editor)
-                lines_cfg = editor.lines[:]; zones_cfg = editor.zones[:]
+                result, aborted = editor.run_modal()
+
+            # Respect Cancel/ESC/X → abort the whole run
+            if aborted or not result:
+                app._log("[INFO] Counter configuration cancelled — aborting run.")
+                cap.release()
+                return
+
+            lines_cfg = result.get("lines", [])
+            zones_cfg = result.get("zones", [])
 
             if not lines_cfg and not zones_cfg:
                 app._log("[WARN] No lines or zones — skipping.")
