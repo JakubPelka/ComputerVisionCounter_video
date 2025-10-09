@@ -74,10 +74,22 @@ def draw_trails(frame, trails, trace_color=None, trace_thickness=2):
         cv2.polylines(frame, [pts], False, col, th, cv2.LINE_AA)
 
 # ---- HUD / results panel -----------------------------------------------------
-def draw_counts_panel(frame, lines_cfg, line_counts, zones_cfg, zone_counts,
-                      anchor: str = "br", margin: int = 12):
+def draw_counts_panel(frame,
+                      lines_cfg, line_counts,
+                      zones_cfg, zone_counts,
+                      anchor: str = "br",
+                      margin: int = 12,
+                      scale: float | None = None,
+                      app=None):
     """
-    Compact results panel in the chosen corner (default: bottom-right), on solid black.
+    Compact results panel in the chosen corner (default: bottom-right) on black background.
+    Auto-scales with frame height and Extras->HUD size (%).
+
+    Args:
+        anchor: "tl"|"tr"|"bl"|"br"
+        margin: base margin (will also be scaled)
+        scale:  if given, additional multiplier (e.g. 1.25). If None, read from app.adv_params['hud_scale'].
+        app:    optional App to read adv_params['hud_scale'].
     """
     # Build lines of text
     rows: list[str] = []
@@ -97,28 +109,46 @@ def draw_counts_panel(frame, lines_cfg, line_counts, zones_cfg, zone_counts,
     if not rows:
         return
 
+    H, W = frame.shape[:2]
+
+    # auto scale from resolution + user multiplier from Extras tab
+    auto = max(0.6, min(2.2, H / 720.0))
+    user = 1.0
+    if scale is not None:
+        user = float(scale)
+    elif app is not None:
+        try:
+            user = float(getattr(app, "adv_params", {}).get("hud_scale", 1.0))
+        except Exception:
+            user = 1.0
+    s = auto * user  # final scale
+
     font = cv2.FONT_HERSHEY_SIMPLEX
-    scale, th = 1.0, 2
-    pad, gap = 8, 6
-    sizes = [cv2.getTextSize(t, font, scale, th)[0] for t in rows]
+    txt_scale = 0.6 * s
+    th = max(1, int(2 * s))
+    pad = int(8 * s)
+    gap = int(6 * s)
+    mar = int(margin * s)
+
+    # measure
+    sizes = [cv2.getTextSize(t, font, txt_scale, th)[0] for t in rows]
     maxw  = max(w for w, h in sizes)
     lineh = max(h for w, h in sizes)
     panel_w = maxw + 2*pad
     panel_h = len(rows) * (lineh + gap) - gap + 2*pad
 
-    H, W = frame.shape[:2]
     if anchor == "tl":
-        x0, y0 = margin, margin
+        x0, y0 = mar, mar
     elif anchor == "tr":
-        x0, y0 = W - margin - panel_w, margin
+        x0, y0 = W - mar - panel_w, mar
     elif anchor == "bl":
-        x0, y0 = margin, H - margin - panel_h
+        x0, y0 = mar, H - mar - panel_h
     else:  # "br"
-        x0, y0 = W - margin - panel_w, H - margin - panel_h
+        x0, y0 = W - mar - panel_w, H - mar - panel_h
 
-    # solid black background (best readability)
+    # solid black background for readability
     cv2.rectangle(frame, (x0, y0), (x0 + panel_w, y0 + panel_h), (0, 0, 0), -1)
     y = y0 + pad + lineh
     for t in rows:
-        cv2.putText(frame, t, (x0 + pad, y), font, scale, (255, 255, 255), th, cv2.LINE_AA)
+        cv2.putText(frame, t, (x0 + pad, y), font, txt_scale, (255, 255, 255), th, cv2.LINE_AA)
         y += lineh + gap

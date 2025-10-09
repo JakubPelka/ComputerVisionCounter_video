@@ -110,6 +110,7 @@ class CounterEditor(tk.Toplevel):
         tk.Button(controls, text="Clear (resume LIVE)", command=self.clear_and_resume).pack(side="left", padx=4)
         tk.Button(controls, text="Load…", command=self.load_dialog).pack(side="left", padx=10)
         tk.Button(controls, text="Save…", command=self.save_dialog).pack(side="left", padx=4)
+        tk.Button(controls, text="Cancel", command=self.abort).pack(side="right", padx=6)
         tk.Button(controls, text="OK (Save & close)", command=self.finish).pack(side="right", padx=4)
 
         # Quick rules for A->B direction (ASCII only so it renders everywhere)
@@ -275,6 +276,8 @@ class CounterEditor(tk.Toplevel):
 
     def _ask_name(self, prompt):
         win = tk.Toplevel(self); win.title("Name")
+        win.protocol("WM_DELETE_WINDOW", self.abort)
+        win.bind("<Escape>", self.abort)
         tk.Label(win, text=prompt, justify="left", anchor="w").pack(padx=6, pady=6, fill="x")
         var = tk.StringVar()
         e = tk.Entry(win, textvariable=var); e.pack(padx=6, pady=6, fill="x"); e.focus_set()
@@ -348,6 +351,17 @@ class CounterEditor(tk.Toplevel):
         if not name: return
         self.lines.append({"name": name, "pts": [[float(x), float(y)] for x, y in pts]})
 
+    def abort(self, *_evt):
+        """Abort without saving changes."""
+        try:
+            # mark aborted if your caller checks it
+            setattr(self, "_aborted", True)
+        except Exception:
+            pass
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
 
     def finish(self):

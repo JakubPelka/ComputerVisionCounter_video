@@ -479,7 +479,7 @@ def run(app, sources, outp: Path, selected_idx):
                                 trace_color=_parse_color(p.get("trace_color", None)),
                                 trace_thickness=int(p.get("trace_thickness", 2)) if str(p.get("trace_thickness","")).strip() != "" else 2)
 
-                draw_counts_panel(ov, lines_cfg, line_counts, zones_cfg, zone_counts, anchor="br")
+                draw_counts_panel(ov, lines_cfg, line_counts, zones_cfg, zone_counts, anchor="br", app=app)
                 return ov
 
             processed = 0
