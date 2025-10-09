@@ -3,6 +3,8 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, colorchooser, filedialog, messagebox
 from pathlib import Path
+import json
+from datetime import datetime
 
 # ───────────────────── path helpers ─────────────────────
 def _get_project_root() -> Path:
@@ -14,6 +16,11 @@ def _get_project_root() -> Path:
 
 def _sounds_dir() -> Path:
     d = _get_project_root() / "sounds"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def _presets_dir() -> Path:
+    d = _get_project_root() / "presets"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -32,14 +39,10 @@ def _str(var, default="") -> str:
 
 # ───────────────────── UI helpers ─────────────────────
 def _row(parent, label_text: str, build_widget) -> tuple[ttk.Frame, tk.Widget]:
-    """
-    Horizontal row: left label + widget built by build_widget(frame).
-    Ensures the widget is packed (fix for empty rows).
-    """
+    """Horizontal row: left label + widget built by build_widget(frame)."""
     fr = ttk.Frame(parent)
     ttk.Label(fr, text=label_text, width=22, anchor="w").pack(side="left")
     w = build_widget(fr)
-    # make sure the created widget is actually visible
     try:
         if isinstance(w, tk.Widget):
             w.pack(side="left")
@@ -98,7 +101,7 @@ def _bind_help(widget: tk.Widget, key: str, help_label: tk.Label):
 # ───────────────────── main builder ─────────────────────
 def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     """
-    Build the full 'Advanced options' panel with vertical rows (as before) and contextual help.
+    Build the full 'Advanced options' panel with vertical rows and contextual help.
     """
     if not hasattr(app, "adv_params"):
         app.adv_params = {}
@@ -113,7 +116,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         "match_thresh": p.get("match_thresh", 0.8),
         "min_hits": p.get("min_hits", 2),
         "line_min_gap": p.get("line_min_gap", 8),
-        "line_min_sep": p.get("line_min_sep", 12),          # runner uses this key
+        "line_min_sep": p.get("line_min_sep", 12),  # runner uses this key
         "zone_min_gap": p.get("zone_min_gap", 6),
         "live_preview": p.get("live_preview", True),
         "trace_enabled": p.get("trace_enabled", True),
@@ -297,37 +300,41 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         return box
     _row(lf, "", _mode_row)
 
-    # Apply & Restore
+    # ───────── helper to collect current values ─────────
+    def _collect() -> dict:
+        return {
+            "imgsz": _int(v_imgsz, defaults["imgsz"]),
+            "conf": _float(v_conf, defaults["conf"]),
+            "iou": _float(v_iou, defaults["iou"]),
+            "frame_skip": _int(v_frame_skip, defaults["frame_skip"]),
+            "track_buffer": _int(v_track_buffer, defaults["track_buffer"]),
+            "match_thresh": _float(v_match_thresh, defaults["match_thresh"]),
+            "min_hits": _int(v_min_hits, defaults["min_hits"]),
+            "line_min_gap": _int(v_line_gap, defaults["line_min_gap"]),
+            "line_min_sep": _int(v_line_sep, defaults["line_min_sep"]),
+            "zone_min_gap": _int(v_zone_gap, defaults["zone_min_gap"]),
+            "live_preview": bool(v_live_preview.get()),
+            "trace_enabled": bool(v_trace_en.get()),
+            "trace_len": _int(v_trace_len, defaults["trace_len"]),
+            "anchor_mode": _str(v_anchor_mode, defaults["anchor_mode"]),
+            "ghost_margin": _int(v_ghost_margin, defaults["ghost_margin"]),
+            "trace_color": _str(v_trace_color, defaults["trace_color"]),
+            "trace_thickness": _int(v_trace_thick, defaults["trace_thickness"]),
+            "overlay_frame_color": _str(v_frame_color, defaults["overlay_frame_color"]),
+            "overlay_frame_thickness": _int(v_frame_thick, defaults["overlay_frame_thickness"]),
+            "alert_enabled": bool(v_alert_en.get()),
+            "alert_sound": _str(v_alert_sound, defaults["alert_sound"]),
+            "alert_loop": bool(v_alert_loop.get()),
+            "alert_freeze_s": _int(v_alert_freeze, defaults["alert_freeze_s"]),
+            "alert_zone_inside": _int(v_alert_inside, defaults["alert_zone_inside"]),
+            "_meta": {"version": 1, "saved_at": datetime.now().isoformat(timespec="seconds")},
+        }
+
+    # Apply & Restore + Save/Load
     bar = ttk.Frame(left); bar.pack(fill="x", padx=6, pady=(0, 8))
+
     def _apply():
-        p["imgsz"] = _int(v_imgsz, defaults["imgsz"])
-        p["conf"] = _float(v_conf, defaults["conf"])
-        p["iou"] = _float(v_iou, defaults["iou"])
-        p["frame_skip"] = _int(v_frame_skip, defaults["frame_skip"])
-        p["track_buffer"] = _int(v_track_buffer, defaults["track_buffer"])
-        p["match_thresh"] = _float(v_match_thresh, defaults["match_thresh"])
-        p["min_hits"] = _int(v_min_hits, defaults["min_hits"])
-        p["line_min_gap"] = _int(v_line_gap, defaults["line_min_gap"])
-        p["line_min_sep"] = _int(v_line_sep, defaults["line_min_sep"])   # ← correct key
-        p["zone_min_gap"] = _int(v_zone_gap, defaults["zone_min_gap"])
-
-        p["live_preview"] = bool(v_live_preview.get())
-        p["trace_enabled"] = bool(v_trace_en.get())
-        p["trace_len"] = _int(v_trace_len, defaults["trace_len"])
-        p["anchor_mode"] = _str(v_anchor_mode, defaults["anchor_mode"])
-        p["ghost_margin"] = _int(v_ghost_margin, defaults["ghost_margin"])
-
-        p["trace_color"] = _str(v_trace_color, defaults["trace_color"])
-        p["trace_thickness"] = _int(v_trace_thick, defaults["trace_thickness"])
-        p["overlay_frame_color"] = _str(v_frame_color, defaults["overlay_frame_color"])
-        p["overlay_frame_thickness"] = _int(v_frame_thick, defaults["overlay_frame_thickness"])
-
-        p["alert_enabled"] = bool(v_alert_en.get())
-        p["alert_sound"] = _str(v_alert_sound, defaults["alert_sound"])
-        p["alert_loop"] = bool(v_alert_loop.get())
-        p["alert_freeze_s"] = _int(v_alert_freeze, defaults["alert_freeze_s"])
-        p["alert_zone_inside"] = _int(v_alert_inside, defaults["alert_zone_inside"])
-
+        app.adv_params.update(_collect())
         messagebox.showinfo("Advanced options", "Saved. Values are now active for the next run.")
     ttk.Button(bar, text="Apply", command=_apply).pack(side="left")
 
@@ -336,5 +343,81 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         if callable(fn): fn()
         else: messagebox.showinfo("Preset", "No preset restore function found in this build.")
     ttk.Button(bar, text="Restore preset from slider", command=_restore).pack(side="left", padx=(8, 0))
+
+    def _save_preset():
+        data = _collect()  # capture current UI values (even if Apply not pressed)
+        initialdir = str(_presets_dir())
+        fname = f"adv_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        path = filedialog.asksaveasfilename(
+            title="Save preset",
+            initialdir=initialdir,
+            defaultextension=".json",
+            initialfile=fname,
+            filetypes=[("JSON preset", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            messagebox.showinfo("Preset", f"Saved preset:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Preset", f"Could not save:\n{e}")
+    ttk.Button(bar, text="Save preset…", command=_save_preset).pack(side="left", padx=(8, 0))
+
+    def _load_preset():
+        initialdir = str(_presets_dir())
+        path = filedialog.askopenfilename(
+            title="Load preset",
+            initialdir=initialdir,
+            filetypes=[("JSON preset", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception as e:
+            messagebox.showerror("Preset", f"Could not read file:\n{e}")
+            return
+
+        # tolerate older/newer keys
+        def _getk(*names, default=None):
+            for n in names:
+                if n in d: return d[n]
+            return default
+
+        v_imgsz.set(str(_getk("imgsz", default=defaults["imgsz"])))
+        v_conf.set(str(_getk("conf", default=defaults["conf"])))
+        v_iou.set(str(_getk("iou", default=defaults["iou"])))
+        v_frame_skip.set(str(_getk("frame_skip", default=defaults["frame_skip"])))
+        v_track_buffer.set(str(_getk("track_buffer", default=defaults["track_buffer"])))
+        v_match_thresh.set(str(_getk("match_thresh", default=defaults["match_thresh"])))
+        v_min_hits.set(str(_getk("min_hits", default=defaults["min_hits"])))
+        v_line_gap.set(str(_getk("line_min_gap", default=defaults["line_min_gap"])))
+        v_line_sep.set(str(_getk("line_min_sep", "line_min_sep_px", default=defaults["line_min_sep"])))
+        v_zone_gap.set(str(_getk("zone_min_gap", default=defaults["zone_min_gap"])))
+
+        v_live_preview.set(bool(_getk("live_preview", default=defaults["live_preview"])))
+        v_trace_en.set(bool(_getk("trace_enabled", default=defaults["trace_enabled"])))
+        v_trace_len.set(str(_getk("trace_len", default=defaults["trace_len"])))
+        v_anchor_mode.set(str(_getk("anchor_mode", default=defaults["anchor_mode"])))
+        v_ghost_margin.set(str(_getk("ghost_margin", default=defaults["ghost_margin"])))
+
+        v_trace_color.set(str(_getk("trace_color", default=defaults["trace_color"])))
+        v_trace_thick.set(str(_getk("trace_thickness", default=defaults["trace_thickness"])))
+        v_frame_color.set(str(_getk("overlay_frame_color", "frame_color", default=defaults["overlay_frame_color"])))
+        v_frame_thick.set(str(_getk("overlay_frame_thickness", "frame_thickness", default=defaults["overlay_frame_thickness"])))
+
+        v_alert_en.set(bool(_getk("alert_enabled", default=defaults["alert_enabled"])))
+        v_alert_sound.set(str(_getk("alert_sound", default=defaults["alert_sound"])))
+        v_alert_loop.set(bool(_getk("alert_loop", default=defaults["alert_loop"])))
+        v_alert_freeze.set(int(_getk("alert_freeze_s", default=defaults["alert_freeze_s"])))
+        v_alert_inside.set(int(_getk("alert_zone_inside", default=defaults["alert_zone_inside"])))
+
+        # auto-apply so it's active
+        app.adv_params.update(_collect())
+        messagebox.showinfo("Preset", f"Loaded and applied:\n{path}")
+    ttk.Button(bar, text="Load preset…", command=_load_preset).pack(side="left", padx=(8, 0))
 
     return root
