@@ -1,4 +1,4 @@
-# cv_video_advanced_ui.py — Advanced settings UI (now with Extras ▸ Heatmap)
+# cv_video_advanced_ui.py — Advanced settings UI (Extras ▸ Heatmap with On/Off, Gain, Memory×)
 from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -6,16 +6,14 @@ from pathlib import Path
 import json
 from datetime import datetime
 
-# use project sound player for consistent behavior
 try:
     from cv_video_sound import SoundPlayer
 except Exception:
-    SoundPlayer = None  # guarded use
+    SoundPlayer = None
 
-# ───────────────────── constants ─────────────────────
-HELP_WIDTH = 420   # fixed help panel width (prevents left/right "jumping")
+HELP_WIDTH = 420
 
-# ───────────────────── path helpers ─────────────────────
+# ───────────────────────────────── helpers ──────────────────────────────────
 def _get_project_root() -> Path:
     p = Path(__file__).resolve()
     if "src" in p.parts:
@@ -23,30 +21,23 @@ def _get_project_root() -> Path:
         return Path(*p.parts[:i])
     return p.parent
 
-def _sounds_dir() -> Path:
-    d = _get_project_root() / "sounds"
+def _dir(pathname) -> Path:
+    d = _get_project_root() / pathname
     d.mkdir(parents=True, exist_ok=True)
     return d
 
-def _presets_dir() -> Path:
-    d = _get_project_root() / "presets"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-# ───────────────────── value helpers ─────────────────────
 def _int(var, default=0) -> int:
     try: return int(str(var.get()).strip())
     except Exception: return int(default)
 
 def _float(var, default=0.0) -> float:
-    try: return float(str(var.get()).strip().replace(",", "."))  # EU comma
+    try: return float(str(var.get()).strip().replace(",", "."))
     except Exception: return float(default)
 
 def _str(var, default="") -> str:
     try: return str(var.get()).strip()
     except Exception: return str(default)
 
-# ───────────────────── UI helpers ─────────────────────
 def _row(parent, label_text: str, build_widget) -> tuple[ttk.Frame, tk.Widget]:
     fr = ttk.Frame(parent)
     ttk.Label(fr, text=label_text, width=22, anchor="w").pack(side="left")
@@ -58,21 +49,11 @@ def _row(parent, label_text: str, build_widget) -> tuple[ttk.Frame, tk.Widget]:
     fr.pack(fill="x", padx=6, pady=(2, 2))
     return fr, w
 
-def _browse_sound(var):
-    path = filedialog.askopenfilename(
-        title="Choose alert sound",
-        initialdir=str(_sounds_dir()),
-        filetypes=[("Audio", "*.wav;*.mp3;*.ogg;*.flac;*.aac;*.m4a"), ("All files", "*.*")]
-    )
-    if path: var.set(path)
-
 def _make_scrollable(parent: tk.Misc) -> ttk.Frame:
-    """Return an interior frame that is vertically scrollable."""
     container = ttk.Frame(parent)
     canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0)
     vsb = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
     canvas.configure(yscrollcommand=vsb.set)
-
     interior = ttk.Frame(canvas)
     win_id = canvas.create_window((0, 0), window=interior, anchor="nw")
 
@@ -83,10 +64,8 @@ def _make_scrollable(parent: tk.Misc) -> ttk.Frame:
     interior.bind("<Configure>", _on_config)
     canvas.bind("<Configure>", _on_config)
 
-    # mouse wheel
-    def _on_wheel(e):
-        canvas.yview_scroll(int(-1*(e.delta/120)), "units")
-    canvas.bind_all("<MouseWheel>", _on_wheel)
+    def _wheel(e): canvas.yview_scroll(int(-1*(e.delta/120)), "units")
+    canvas.bind_all("<MouseWheel>", _wheel)
 
     canvas.pack(side="left", fill="both", expand=True)
     vsb.pack(side="right", fill="y")
@@ -94,101 +73,87 @@ def _make_scrollable(parent: tk.Misc) -> ttk.Frame:
     return interior
 
 def _make_help_panel(parent: tk.Misc, title="Help", width=HELP_WIDTH):
-    """Fixed-width help panel with wrapped label (no size jitter)."""
     fr = ttk.LabelFrame(parent, text=title)
-    fr.pack_propagate(False)  # keep fixed width
+    fr.pack_propagate(False)
     fr.config(width=width)
     lbl = tk.Label(fr, text="Focus a field to see help.", justify="left", anchor="nw")
     lbl.pack(fill="both", expand=True, padx=8, pady=8)
-    # fixed wrap to the help frame width
     lbl.config(wraplength=max(50, width - 16))
     return fr, lbl
 
-# ───────────────────── contextual help ─────────────────────
 HELP = {
-    # Detection / tracking
-    "imgsz": "Image size for the AI. Bigger = better detail but slower. Try 320–640 on CPU; 960–1280 only for tiny/far objects.",
-    "conf": "Confidence threshold. Higher = stricter (fewer false alarms, more misses). Start around 0.50–0.60.",
-    "iou": "Overlap used to merge duplicate boxes. Higher merges more; lower keeps more boxes.",
-    "frame_skip": "Process every Nth frame. 0 = every frame (best quality, slowest). +1 or +2 speeds up but can miss fast motion.",
-    "track_buffer": "How long (frames) an ID is kept after it disappears. Higher survives short occlusions; too high may leave ghosts.",
-    "match_thresh": "How strict the tracker is when matching boxes to existing IDs. Higher = stricter (fewer mismatches, more resets).",
-    "min_hits": "Frames required before a new track is confirmed. Flicker? raise. Delayed IDs? lower.",
-    "line_min_gap": "Min frames between two line counts for the same object (anti-bounce).",
-    "line_min_sep": "Min movement across the line (px) before counting again. Sliding along the line? raise this.",
-    "zone_min_gap": "Min frames between zone IN/OUT for the same object. Border toggling? raise this.",
+    "imgsz": "Image size for the AI. Larger = slower but better detail.",
+    "conf": "Confidence threshold for detections.",
+    "iou": "IoU used to merge duplicates.",
+    "frame_skip": "Process every Nth frame (0/1 = all frames).",
+    "track_buffer": "How long (frames) an ID is kept after disappearing.",
+    "match_thresh": "Tracker matching strictness.",
+    "min_hits": "Frames before a track is confirmed.",
+    "line_min_gap": "Anti-bounce gap between line counts.",
+    "line_min_sep": "Min movement across a line (px).",
+    "zone_min_gap": "Anti-flicker gap for zone in/out.",
 
-    # Overlay / trace / anchor
-    "live_preview": "Show the processed video while running. Turn off to save CPU.",
-    "overlay_mode": "centroid = dots; box = rectangles; box+conf = rectangles with score.",
-    "trace_enabled": "Draw a tail behind each tracked object.",
-    "trace_len": "How many recent points to keep per tail.",
-    "anchor_mode": "Point used for counting & trails: bottom (feet/wheels) or center.",
-    "ghost_margin": "Only for bottom anchor: lift the point above the box edge to avoid border/line bounces.",
+    "live_preview": "Show the processed video while running.",
+    "overlay_mode": "centroid = dots; box = rectangles; box+conf = rectangles + score.",
+    "trace_enabled": "Draw a trail for each track.",
+    "trace_len": "Trail length (points).",
+    "anchor_mode": "Counting point: center or bottom of the box.",
+    "ghost_margin": "Offset for bottom anchor to avoid line bouncing.",
 
-    # Colors / thickness
-    "trace_color": "Use 'auto', a #RRGGBB value (e.g. #00FF88), or B,G,R (e.g. 255,200,0).",
-    "trace_thickness": "Tail thickness in pixels.",
-    "overlay_frame_color": "Color for lines & zone outlines. Same formats as trace color.",
-    "overlay_frame_thickness": "Line/zone thickness (pixels).",
+    "trace_color": "auto, #RRGGBB, or B,G,R.",
+    "trace_thickness": "Trail thickness (px).",
+    "overlay_frame_color": "Line/zone color (auto/#RRGGBB/B,G,R).",
+    "overlay_frame_thickness": "Line/zone thickness (px).",
 
-    # Alert
-    "alert_enabled": "Play a sound when the condition below is met for selected classes.",
-    "alert_sound": "Audio file to play. Use Play to test.",
-    "alert_loop": "Loop while condition holds (on) or play single pings with cooldown (off).",
-    "alert_freeze_s": "Cooldown between pings (only when looping is off).",
-    "alert_zone_inside": "Alert when an object is inside the zone (1) or outside (0).",
+    "alert_enabled": "Play a sound when the condition is met.",
+    "alert_sound": "Audio file to play.",
+    "alert_loop": "Loop while active or ping with cooldown.",
+    "alert_freeze_s": "Cooldown between pings (when looping is off).",
+    "alert_zone_inside": "Alert for inside (1) or outside (0) of zone.",
 
-    # Extras (HUD / snapshots)
-    "hud_scale": "Size of the bottom-right HUD panel. 100% = default.",
-    "snapshot_on_events": "Save an annotated snapshot on every line/zone event.",
+    "hud_scale": "Bottom-right HUD scale in percent.",
+    "snapshot_on_events": "Save snapshot on every line/zone event.",
 
-    # Heatmap (new)
-    "heat_enabled": "Accumulate detections into a heatmap over time.",
-    "heat_overlay_on_start": "Show the heatmap blended on top of the video. Toggle live with the 'm' key.",
-    "heat_use_aoi": "Restrict accumulation to your drawn zones (AOI). Off = whole frame.",
-    "heat_alpha": "Overlay opacity (0=only video, 1=only heatmap).",
-    "heat_sigma": "Blob size of each detection (px). Higher = smoother, larger blobs.",
-    "heat_window_enabled": "Use a rolling time window (recent minutes) instead of infinite accumulation.",
-    "heat_window_minutes": "Length of the rolling window in minutes.",
-    "heat_decay": "Alternative to window: per-frame decay in [0..1]. Higher = faster fading.",
-    "heat_save_interval_s": "Save heatmap PNG every N seconds (0 = disable periodic saves).",
+    # Heatmap
+    "heat_enabled": "Create a heatmap by accumulating detections.",
+    "heat_overlay_on_start": "Show heatmap overlay immediately on run start. Toggle with the 'm' key during the run.",
+    "heat_use_aoi": "Restrict accumulation to your drawn zones (AOI).",
+    "heat_alpha": "Overlay opacity on the video (visual intensity).",
+    "heat_sigma": "Blob size per detection (px).",
+    "heat_window_enabled": "Use a rolling time window instead of infinite accumulation.",
+    "heat_window_minutes": "Length of the rolling window, in minutes.",
+    "heat_decay": "Alternative to window: per-frame decay in [0..1]. Higher = faster fade.",
+    "heat_save_interval_s": "Save heatmap every N seconds (0 = off).",
+    "heat_gamma": "Contrast of the overlay (0.5–2.0). Higher = punchier hotspots.",
+    "heat_zero_thresh": "Values ≤ threshold are 100% transparent (true no-data).",
+    "heat_gain": "Per-detection accumulation multiplier. >1 = build faster; <1 = slower.",
+    "heat_memory_mult": "Multiplies the rolling window length. >1 = longer memory (slower fade).",
 }
 
 def _bind_help(widget: tk.Widget, key: str, help_label: tk.Label):
     def on(_e=None): help_label.config(text=HELP.get(key, ""))
-    widget.bind("<FocusIn>", on)
-    widget.bind("<Enter>", on)
+    widget.bind("<FocusIn>", on); widget.bind("<Enter>", on)
 
-# ───────────────────── main builder ─────────────────────
+# ───────────────────────────────── main builder ──────────────────────────────
 def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
-    """
-    Layout:
-      • Notebook with Main + Extras (both have fixed-width Help panel)
-      • Bottom action bar (Apply / Save / Load / Close) always visible
-    """
-    if not hasattr(app, "adv_params"):
-        app.adv_params = {}
+    if not hasattr(app, "adv_params"): app.adv_params = {}
     p = app.adv_params
 
-    # ttk style: make tabs a bit taller/more visible
     try:
         style = ttk.Style(parent)
-        style.configure("Adv.TNotebook.Tab", padding=(16, 8))  # bigger tabs
+        style.configure("Adv.TNotebook.Tab", padding=(16, 8))
         style.configure("Adv.TNotebook", tabmargins=(8, 4, 8, 0))
     except Exception:
         style = None
 
-    # defaults snapshot
+    # defaults snapshot (preserve existing values)
     defaults = {
-        # detection/tracking/hysteresis
         "imgsz": p.get("imgsz", 320), "conf": p.get("conf", 0.5), "iou": p.get("iou", 0.6),
         "frame_skip": p.get("frame_skip", 2), "track_buffer": p.get("track_buffer", 5),
         "match_thresh": p.get("match_thresh", 0.8), "min_hits": p.get("min_hits", 2),
         "line_min_gap": p.get("line_min_gap", 8), "line_min_sep": p.get("line_min_sep", 12),
         "zone_min_gap": p.get("zone_min_gap", 6),
 
-        # overlay / trace / anchor
         "live_preview": p.get("live_preview", True),
         "trace_enabled": p.get("trace_enabled", True), "trace_len": p.get("trace_len", 24),
         "overlay_mode": p.get("overlay_mode", "centroid"),
@@ -197,16 +162,14 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         "overlay_frame_color": p.get("overlay_frame_color", "auto"),
         "overlay_frame_thickness": p.get("overlay_frame_thickness", 2),
 
-        # alerts
         "alert_enabled": p.get("alert_enabled", False), "alert_sound": p.get("alert_sound", ""),
         "alert_loop": p.get("alert_loop", True), "alert_freeze_s": p.get("alert_freeze_s", 2),
         "alert_zone_inside": p.get("alert_zone_inside", 1),
 
-        # extras
         "hud_scale": float(p.get("hud_scale", 1.0)),
         "snapshot_on_events": bool(p.get("snapshot_on_events", False)),
 
-        # heatmap (new)
+        # Heatmap
         "heat_enabled": p.get("heat_enabled", False),
         "heat_overlay_on_start": p.get("heat_overlay_on_start", False),
         "heat_use_aoi": p.get("heat_use_aoi", False),
@@ -216,15 +179,20 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         "heat_window_minutes": p.get("heat_window_minutes", 5.0),
         "heat_decay": p.get("heat_decay", 0.02),
         "heat_save_interval_s": p.get("heat_save_interval_s", 0),
+        "heat_gamma": p.get("heat_gamma", 1.0),
+        "heat_zero_thresh": p.get("heat_zero_thresh", 1e-6),
+        # NEW
+        "heat_gain": p.get("heat_gain", 1.0),
+        "heat_memory_mult": p.get("heat_memory_mult", 1.0),
     }
 
-    # tk variables (re-use if present)
+    # tk variables (reuse if already on app)
     def _ensure(name, cls, value):
         if hasattr(app, name) and isinstance(getattr(app, name), cls):
             return getattr(app, name)
         v = cls(value=value); setattr(app, name, v); return v
 
-    # Detection / Tracking / Hysteresis vars
+    # Detection / tracking / hysteresis
     v_imgsz        = _ensure("v_imgsz", tk.StringVar, str(defaults["imgsz"]))
     v_conf         = _ensure("v_conf", tk.StringVar, str(defaults["conf"]))
     v_iou          = _ensure("v_iou", tk.StringVar, str(defaults["iou"]))
@@ -236,7 +204,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     v_line_sep     = _ensure("v_line_sep", tk.StringVar, str(defaults["line_min_sep"]))
     v_zone_gap     = _ensure("v_zone_gap", tk.StringVar, str(defaults["zone_min_gap"]))
 
-    # Overlay / Trace / Anchor / Ghost
+    # Overlay / trace / anchor
     v_live_preview = _ensure("preview_enabled", tk.BooleanVar, bool(defaults["live_preview"]))
     app.overlay_mode = _ensure("overlay_mode", tk.StringVar, str(defaults["overlay_mode"]))
     app.anchor_mode  = _ensure("anchor_mode",  tk.StringVar, str(defaults["anchor_mode"]))
@@ -260,254 +228,215 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     v_hud_scale       = _ensure("v_hud_scale", tk.StringVar, str(int(round(float(defaults["hud_scale"]) * 100))))
     v_snapshot_events = _ensure("snapshot_on_events", tk.BooleanVar, bool(defaults["snapshot_on_events"]))
 
-    # Heatmap (local vars; persisted via _collect into adv_params)
-    v_heat_enabled          = tk.BooleanVar(value=bool(defaults["heat_enabled"]))
+    # Heatmap vars
+    v_heat_enabled          = tk.IntVar(value=1 if defaults["heat_enabled"] else 0)  # radio 0/1
     v_heat_overlay          = tk.BooleanVar(value=bool(defaults["heat_overlay_on_start"]))
     v_heat_use_aoi          = tk.BooleanVar(value=bool(defaults["heat_use_aoi"]))
     v_heat_alpha            = tk.DoubleVar(value=float(defaults["heat_alpha"]))
+    v_heat_gamma            = tk.DoubleVar(value=float(defaults["heat_gamma"]))
+    v_heat_zero_thresh      = tk.DoubleVar(value=float(defaults["heat_zero_thresh"]))
     v_heat_sigma            = tk.IntVar(value=int(defaults["heat_sigma"]))
     v_heat_window_enabled   = tk.BooleanVar(value=bool(defaults["heat_window_enabled"]))
     v_heat_window_minutes   = tk.DoubleVar(value=float(defaults["heat_window_minutes"]))
     v_heat_decay            = tk.DoubleVar(value=float(defaults["heat_decay"]))
     v_heat_save_interval_s  = tk.IntVar(value=int(defaults["heat_save_interval_s"]))
+    # NEW
+    v_heat_gain             = tk.DoubleVar(value=float(defaults["heat_gain"]))
+    v_heat_memory_mult      = tk.DoubleVar(value=float(defaults["heat_memory_mult"]))
 
-    # ────────────────── outer container: notebook + bottom bar ──────────────────
+    # ─────────────────────────── layout ───────────────────────────
     root = ttk.Frame(parent); root.pack(fill="both", expand=True)
-    nb_style = "Adv.TNotebook" if style else "TNotebook"
-    nb = ttk.Notebook(root, style=nb_style); nb.pack(side="top", fill="both", expand=True)
+    nb = ttk.Notebook(root, style=("Adv.TNotebook" if style else "TNotebook")); nb.pack(side="top", fill="both", expand=True)
 
-    # === MAIN TAB (scrollable) ===
+    # MAIN tab
     main_tab = ttk.Frame(nb); nb.add(main_tab, text="Main")
     main = _make_scrollable(main_tab)
+    left = ttk.Frame(main); left.pack(side="left", fill="both", expand=True)
+    right, help_lbl = _make_help_panel(main, title="Help", width=HELP_WIDTH); right.pack(side="left", fill="y", padx=(8,0))
 
-    left = ttk.Frame(main);  left.pack(side="left", fill="both", expand=True)
-    right, help_lbl = _make_help_panel(main, title="Help", width=HELP_WIDTH)
-    right.pack(side="left", fill="y", padx=(8, 0))  # fixed-width help panel
+    lf = ttk.LabelFrame(left, text="Detection / Tracking / Hysteresis"); lf.pack(fill="x", padx=6, pady=(6,4))
+    for key, var in (("imgsz", v_imgsz), ("conf", v_conf), ("iou", v_iou),
+                     ("frame_skip", v_frame_skip), ("track_buffer", v_track_buffer),
+                     ("match_thresh", v_match_thresh), ("min_hits", v_min_hits),
+                     ("line_min_gap_frames", v_line_gap), ("line_min_sep_px", v_line_sep),
+                     ("zone_min_gap_frames", v_zone_gap)):
+        _, e = _row(lf, key, lambda fr, v=var: ttk.Entry(fr, textvariable=v, width=10)); _bind_help(e, key.split("_frames")[0].split("_px")[0], help_lbl)
 
-    # Detection / Tracking / Hysteresis
-    lf = ttk.LabelFrame(left, text="Detection / Tracking / Hysteresis"); lf.pack(fill="x", padx=6, pady=(6, 4))
-    _, e = _row(lf, "imgsz",        lambda fr: ttk.Entry(fr, textvariable=v_imgsz, width=10));        _bind_help(e, "imgsz", help_lbl)
-    _, e = _row(lf, "conf",         lambda fr: ttk.Entry(fr, textvariable=v_conf, width=10));         _bind_help(e, "conf", help_lbl)
-    _, e = _row(lf, "iou",          lambda fr: ttk.Entry(fr, textvariable=v_iou, width=10));          _bind_help(e, "iou", help_lbl)
-    _, e = _row(lf, "frame_skip",   lambda fr: ttk.Entry(fr, textvariable=v_frame_skip, width=10));   _bind_help(e, "frame_skip", help_lbl)
-    _, e = _row(lf, "track_buffer", lambda fr: ttk.Entry(fr, textvariable=v_track_buffer, width=10)); _bind_help(e, "track_buffer", help_lbl)
-    _, e = _row(lf, "match_thresh", lambda fr: ttk.Entry(fr, textvariable=v_match_thresh, width=10)); _bind_help(e, "match_thresh", help_lbl)
-    _, e = _row(lf, "min_hits",     lambda fr: ttk.Entry(fr, textvariable=v_min_hits, width=10));     _bind_help(e, "min_hits", help_lbl)
-    _, e = _row(lf, "line_min_gap_frames", lambda fr: ttk.Entry(fr, textvariable=v_line_gap, width=10)); _bind_help(e, "line_min_gap", help_lbl)
-    _, e = _row(lf, "line_min_sep_px",     lambda fr: ttk.Entry(fr, textvariable=v_line_sep, width=10)); _bind_help(e, "line_min_sep", help_lbl)
-    _, e = _row(lf, "zone_min_gap_frames", lambda fr: ttk.Entry(fr, textvariable=v_zone_gap, width=10)); _bind_help(e, "zone_min_gap", help_lbl)
-
-    # Overlay / Trace / Anchor / Ghost
-    lf = ttk.LabelFrame(left, text="Overlay / Trace / Anchor / Ghost"); lf.pack(fill="x", padx=6, pady=(4, 4))
+    lf = ttk.LabelFrame(left, text="Overlay / Trace / Anchor / Ghost"); lf.pack(fill="x", padx=6, pady=(4,4))
     _, cb = _row(lf, "", lambda fr: ttk.Checkbutton(fr, text="Enable LIVE preview", variable=v_live_preview)); _bind_help(cb, "live_preview", help_lbl)
-
     def _overlay_row(fr):
         box = ttk.Frame(fr)
-        ttk.Label(box, text="Overlay mode:").pack(side="left")
-        cmb = ttk.Combobox(box, textvariable=app.overlay_mode, width=12, state="readonly",
-                           values=["centroid", "box", "box+conf"])
-        cmb.pack(side="left", padx=(6, 0))
-        _bind_help(cmb, "overlay_mode", help_lbl)
+        ttk.Label(box, text="Overlay:").pack(side="left")
+        cmb = ttk.Combobox(box, textvariable=app.overlay_mode, state="readonly", width=12, values=["centroid", "box", "box+conf"])
+        cmb.pack(side="left", padx=(6,0)); _bind_help(cmb, "overlay_mode", help_lbl)
         return box
     _row(lf, "", _overlay_row)
-
     def _trace_row(fr):
         box = ttk.Frame(fr)
-        c = ttk.Checkbutton(box, text="Trace", variable=app.trace_enabled); c.pack(side="left")
-        _bind_help(c, "trace_enabled", help_lbl)
-        ttk.Label(box, text="len:").pack(side="left", padx=(8, 2))
-        sp = ttk.Spinbox(box, from_=1, to=240, textvariable=app.trace_len, width=5); sp.pack(side="left")
-        _bind_help(sp, "trace_len", help_lbl)
+        c = ttk.Checkbutton(box, text="Trace", variable=app.trace_enabled); c.pack(side="left"); _bind_help(c, "trace_enabled", help_lbl)
+        ttk.Label(box, text="len:").pack(side="left", padx=(8,2))
+        sp = ttk.Spinbox(box, from_=1, to=240, textvariable=app.trace_len, width=5); sp.pack(side="left"); _bind_help(sp, "trace_len", help_lbl)
         return box
     _row(lf, "", _trace_row)
-
     def _anchor_row(fr):
         box = ttk.Frame(fr)
         ttk.Label(box, text="Anchor:").pack(side="left")
-        om = ttk.OptionMenu(box, app.anchor_mode, app.anchor_mode.get(), "center", "bottom")
-        om.pack(side="left", padx=(4, 12))
+        om = ttk.OptionMenu(box, app.anchor_mode, app.anchor_mode.get(), "center", "bottom"); om.pack(side="left", padx=(4,12))
         _bind_help(om, "anchor_mode", help_lbl)
         ttk.Label(box, text="Ghost margin (px):").pack(side="left")
-        sp = ttk.Spinbox(box, from_=0, to=256, textvariable=app.ghost_margin, width=6)
-        sp.pack(side="left"); _bind_help(sp, "ghost_margin", help_lbl)
+        sp = ttk.Spinbox(box, from_=0, to=256, textvariable=app.ghost_margin, width=6); sp.pack(side="left"); _bind_help(sp, "ghost_margin", help_lbl)
         return box
     _row(lf, "", _anchor_row)
 
-    # Colors/Thickness (overlay)
-    lf = ttk.LabelFrame(left, text="Colors/Thickness (overlay)"); lf.pack(fill="x", padx=6, pady=(4, 4))
-    def _trace_color_row(fr):
-        box = ttk.Frame(fr)
-        ttk.Label(box, text="Trace color (auto/#RRGGBB/B,G,R)").pack(side="left")
-        e = ttk.Entry(box, textvariable=v_trace_color, width=14); e.pack(side="left", padx=(6, 6))
-        _bind_help(e, "trace_color", help_lbl)
-        return box
-    _row(lf, "", _trace_color_row)
+    lf = ttk.LabelFrame(left, text="Colors/Thickness"); lf.pack(fill="x", padx=6, pady=(4,6))
+    for key, var, width in (("Trace color (auto/#RRGGBB/B,G,R)", v_trace_color, 14),
+                            ("Trace thickness (px)", v_trace_thick, 6),
+                            ("Frame color (auto/#RRGGBB/B,G,R)", v_frame_color, 14),
+                            ("Frame thickness (px)", v_frame_thick, 6)):
+        def _make(fr, v=var, w=width): return ttk.Entry(fr, textvariable=v, width=w)
+        label = " ".join(key.split()[:-1]) if key.endswith("(px)") else key
+        _, e = _row(lf, label, _make)
+        _bind_help(e, ("trace_color" if "Trace color" in key else
+                       "trace_thickness" if "thickness" in key and "Trace" in key else
+                       "overlay_frame_color" if "Frame color" in key else "overlay_frame_thickness"), help_lbl)
 
-    def _trace_th_row(fr):
-        box = ttk.Frame(fr)
-        ttk.Label(box, text="Trace thickness (px)").pack(side="left")
-        sp = ttk.Spinbox(box, from_=1, to=12, textvariable=v_trace_thick, width=6); sp.pack(side="left", padx=(6, 6))
-        _bind_help(sp, "trace_thickness", help_lbl)
-        return box
-    _row(lf, "", _trace_th_row)
-
-    def _frame_color_row(fr):
-        box = ttk.Frame(fr)
-        ttk.Label(box, text="Frame color (auto/#RRGGBB/B,G,R)").pack(side="left")
-        e = ttk.Entry(box, textvariable=v_frame_color, width=14); e.pack(side="left", padx=(6, 6))
-        _bind_help(e, "overlay_frame_color", help_lbl)
-        return box
-    _row(lf, "", _frame_color_row)
-
-    def _frame_th_row(fr):
-        box = ttk.Frame(fr)
-        ttk.Label(box, text="Frame thickness (px)").pack(side="left")
-        sp = ttk.Spinbox(box, from_=1, to=12, textvariable=v_frame_thick, width=6); sp.pack(side="left", padx=(6, 6))
-        _bind_help(sp, "overlay_frame_thickness", help_lbl)
-        return box
-    _row(lf, "", _frame_th_row)
-
-    # Sound alert (zones)
-    lf = ttk.LabelFrame(left, text="Sound alert (zones)"); lf.pack(fill="x", padx=6, pady=(4, 6))
-    _, cb = _row(lf, "", lambda fr: ttk.Checkbutton(fr, text="Enable alert (uses selected classes)", variable=app.alert_enabled))
-    _bind_help(cb, "alert_enabled", help_lbl)
-
-    sound_player_ref = {"player": None}
-    def _play_sound():
-        if not SoundPlayer:
-            messagebox.showwarning("Sound", "Sound player not available in this build."); return
-        path = (app.alert_sound.get() or "").strip()
-        if not path:
-            messagebox.showwarning("Sound", "Please choose a sound file first."); return
-        try:
-            sound_player_ref["player"] = SoundPlayer(path)
-            sound_player_ref["player"].play_once()
-        except Exception as e:
-            messagebox.showerror("Sound", f"Could not play:\n{e}")
-    def _stop_sound():
-        try:
-            if sound_player_ref["player"]: sound_player_ref["player"].stop()
-        except Exception: pass
-
+    # Alerts
+    lf = ttk.LabelFrame(left, text="Sound alert (zones)"); lf.pack(fill="x", padx=6, pady=(0,6))
+    _, cb = _row(lf, "", lambda fr: ttk.Checkbutton(fr, text="Enable alert", variable=app.alert_enabled)); _bind_help(cb, "alert_enabled", help_lbl)
     def _sound_row(fr):
         box = ttk.Frame(fr)
         ttk.Label(box, text="Sound file:").pack(side="left")
-        e = ttk.Entry(box, textvariable=app.alert_sound, width=42); e.pack(side="left", padx=(6, 6), fill="x", expand=True)
-        ttk.Button(box, text="Browse…", command=lambda: _browse_sound(app.alert_sound)).pack(side="left", padx=(0, 6))
-        ttk.Button(box, text="Play", command=_play_sound).pack(side="left")
-        ttk.Button(box, text="Stop", command=_stop_sound).pack(side="left", padx=(4, 0))
+        e = ttk.Entry(box, textvariable=app.alert_sound, width=42); e.pack(side="left", padx=(6,6), fill="x", expand=True)
+        ttk.Button(box, text="Browse…", command=lambda: app.alert_sound.set(filedialog.askopenfilename(initialdir=str(_dir('sounds'))))).pack(side="left")
         _bind_help(e, "alert_sound", help_lbl)
         return box
     _row(lf, "", _sound_row)
-
     def _loop_row(fr):
         box = ttk.Frame(fr)
-        cb = ttk.Checkbutton(box, text="Loop while active", variable=app.alert_loop); cb.pack(side="left")
-        _bind_help(cb, "alert_loop", help_lbl)
-        ttk.Label(box, text="freeze (s):").pack(side="left", padx=(10, 2))
-        sp = ttk.Spinbox(box, from_=0, to=30, textvariable=app.alert_freeze_s, width=6); sp.pack(side="left")
-        _bind_help(sp, "alert_freeze_s", help_lbl)
+        cb = ttk.Checkbutton(box, text="Loop while active", variable=app.alert_loop); cb.pack(side="left"); _bind_help(cb, "alert_loop", help_lbl)
+        ttk.Label(box, text="freeze (s):").pack(side="left", padx=(10,2))
+        sp = ttk.Spinbox(box, from_=0, to=30, textvariable=app.alert_freeze_s, width=6); sp.pack(side="left"); _bind_help(sp, "alert_freeze_s", help_lbl)
         return box
     _row(lf, "", _loop_row)
-
     def _mode_row(fr):
         box = ttk.Frame(fr)
         ttk.Label(box, text="Mode:").pack(side="left")
-        rb1 = ttk.Radiobutton(box, text="inside zone", variable=v_alert_inside, value=1); rb1.pack(side="left", padx=(6, 6))
-        rb2 = ttk.Radiobutton(box, text="outside zone", variable=v_alert_inside, value=0); rb2.pack(side="left", padx=(6, 6))
+        rb1 = ttk.Radiobutton(box, text="inside zone", value=1, variable=v_alert_inside); rb1.pack(side="left", padx=(6,6))
+        rb2 = ttk.Radiobutton(box, text="outside zone", value=0, variable=v_alert_inside); rb2.pack(side="left", padx=(6,6))
         _bind_help(rb1, "alert_zone_inside", help_lbl); _bind_help(rb2, "alert_zone_inside", help_lbl)
         return box
     _row(lf, "", _mode_row)
 
-    # === EXTRAS TAB (scrollable + help) ===
+    # EXTRAS tab
     extras_tab = ttk.Frame(nb); nb.add(extras_tab, text="Extras")
     extras = _make_scrollable(extras_tab)
-
     ex_left = ttk.Frame(extras); ex_left.pack(side="left", fill="both", expand=True)
-    ex_right, ex_help_lbl = _make_help_panel(extras, title="Help", width=HELP_WIDTH)
-    ex_right.pack(side="left", fill="y", padx=(8, 0))
+    ex_right, ex_help = _make_help_panel(extras, title="Help", width=HELP_WIDTH); ex_right.pack(side="left", fill="y", padx=(8,0))
 
-    # HUD group
-    ex_hud = ttk.LabelFrame(ex_left, text="HUD"); ex_hud.pack(fill="x", padx=6, pady=(6, 4))
-    def _hud_spin(fr):
-        return ttk.Spinbox(fr, from_=50, to=200, increment=5, textvariable=v_hud_scale, width=6)
-    _, e = _row(ex_hud, "HUD size (%)", _hud_spin); _bind_help(e, "hud_scale", ex_help_lbl)
+    ex_hud = ttk.LabelFrame(ex_left, text="HUD"); ex_hud.pack(fill="x", padx=6, pady=(6,4))
+    _, e = _row(ex_hud, "HUD size (%)", lambda fr: ttk.Spinbox(fr, from_=50, to=200, increment=5, textvariable=v_hud_scale, width=6)); _bind_help(e, "hud_scale", ex_help)
 
-    # Snapshots group
-    ex_snap = ttk.LabelFrame(ex_left, text="Snapshots"); ex_snap.pack(fill="x", padx=6, pady=(4, 4))
-    def _snap_row(fr):
-        return ttk.Checkbutton(fr, text="Save snapshot on events", variable=v_snapshot_events)
-    _, cb = _row(ex_snap, "", _snap_row); _bind_help(cb, "snapshot_on_events", ex_help_lbl)
+    ex_snap = ttk.LabelFrame(ex_left, text="Snapshots"); ex_snap.pack(fill="x", padx=6, pady=(4,4))
+    _, cb = _row(ex_snap, "", lambda fr: ttk.Checkbutton(fr, text="Save snapshot on events", variable=v_snapshot_events)); _bind_help(cb, "snapshot_on_events", ex_help)
 
-    # Heatmap group (NEW)
-    ex_heat = ttk.LabelFrame(ex_left, text="Heatmap"); ex_heat.pack(fill="x", padx=6, pady=(4, 6))
+    # ───────────── Heatmap ─────────────
+    ex_heat = ttk.LabelFrame(ex_left, text="Heatmap"); ex_heat.pack(fill="x", padx=6, pady=(4,6))
 
-    def _heat_enable_row(fr):
+    def _onoff(fr):
         box = ttk.Frame(fr)
-        cb1 = ttk.Checkbutton(box, text="Enable accumulation", variable=v_heat_enabled); cb1.pack(side="left")
-        _bind_help(cb1, "heat_enabled", ex_help_lbl)
-        cb2 = ttk.Checkbutton(box, text="Show overlay on start", variable=v_heat_overlay); cb2.pack(side="left", padx=(12, 0))
-        _bind_help(cb2, "heat_overlay_on_start", ex_help_lbl)
+        ttk.Label(box, text="Create heatmap:").pack(side="left")
+        rb0 = ttk.Radiobutton(box, text="Off", value=0, variable=v_heat_enabled); rb0.pack(side="left", padx=(8,2))
+        rb1 = ttk.Radiobutton(box, text="On",  value=1, variable=v_heat_enabled); rb1.pack(side="left", padx=(2,0))
+        _bind_help(rb0, "heat_enabled", ex_help); _bind_help(rb1, "heat_enabled", ex_help)
         return box
-    _row(ex_heat, "", _heat_enable_row)
+    _row(ex_heat, "", _onoff)
 
-    def _heat_scope_row(fr):
+    _, cb = _row(ex_heat, "", lambda fr: ttk.Checkbutton(fr, text="Show overlay on start (press 'm' to toggle)", variable=v_heat_overlay))
+    _bind_help(cb, "heat_overlay_on_start", ex_help)
+
+    _, cb = _row(ex_heat, "", lambda fr: ttk.Checkbutton(fr, text="Restrict to zones (AOI mask)", variable=v_heat_use_aoi))
+    _bind_help(cb, "heat_use_aoi", ex_help)
+
+    def _alpha_row(fr):
         box = ttk.Frame(fr)
-        cb = ttk.Checkbutton(box, text="Restrict to zones (AOI mask)", variable=v_heat_use_aoi)
-        cb.pack(side="left")
-        _bind_help(cb, "heat_use_aoi", ex_help_lbl)
+        ttk.Label(box, text="Intensity (alpha 0–1):").pack(side="left")
+        sc = ttk.Scale(box, from_=0.0, to=1.0, variable=v_heat_alpha, orient="horizontal", length=180); sc.pack(side="left", padx=(6,0))
+        _bind_help(sc, "heat_alpha", ex_help)
         return box
-    _row(ex_heat, "", _heat_scope_row)
+    _row(ex_heat, "", _alpha_row)
 
-    def _heat_alpha_row(fr):
+    def _gamma_row(fr):
         box = ttk.Frame(fr)
-        ttk.Label(box, text="Alpha (0–1):").pack(side="left")
-        sc = ttk.Scale(box, from_=0.0, to=1.0, variable=v_heat_alpha, orient="horizontal", length=180)
-        sc.pack(side="left", padx=(6, 0))
-        _bind_help(sc, "heat_alpha", ex_help_lbl)
+        ttk.Label(box, text="Contrast (gamma 0.5–2.0):").pack(side="left")
+        sc = ttk.Scale(box, from_=0.5, to=2.0, variable=v_heat_gamma, orient="horizontal", length=180); sc.pack(side="left", padx=(6,0))
+        _bind_help(sc, "heat_gamma", ex_help)
         return box
-    _row(ex_heat, "", _heat_alpha_row)
+    _row(ex_heat, "", _gamma_row)
 
-    def _heat_sigma_row(fr):
+    def _thr_row(fr):
+        box = ttk.Frame(fr)
+        ttk.Label(box, text="No-data threshold (0–0.02):").pack(side="left")
+        sc = ttk.Scale(box, from_=0.0, to=0.02, variable=v_heat_zero_thresh, orient="horizontal", length=180); sc.pack(side="left", padx=(6,0))
+        _bind_help(sc, "heat_zero_thresh", ex_help)
+        return box
+    _row(ex_heat, "", _thr_row)
+
+    def _gain_row(fr):  # NEW
+        box = ttk.Frame(fr)
+        ttk.Label(box, text="Accumulation gain (0.1–5.0):").pack(side="left")
+        sc = ttk.Scale(box, from_=0.1, to=5.0, variable=v_heat_gain, orient="horizontal", length=180); sc.pack(side="left", padx=(6,0))
+        _bind_help(sc, "heat_gain", ex_help)
+        return box
+    _row(ex_heat, "", _gain_row)
+
+    def _memory_row(fr):  # NEW
+        box = ttk.Frame(fr)
+        ttk.Label(box, text="Memory (fade) × (0.25–4):").pack(side="left")
+        sc = ttk.Scale(box, from_=0.25, to=4.0, variable=v_heat_memory_mult, orient="horizontal", length=180); sc.pack(side="left", padx=(6,0))
+        _bind_help(sc, "heat_memory_mult", ex_help)
+        return box
+    _row(ex_heat, "", _memory_row)
+
+    def _sigma_row(fr):
         box = ttk.Frame(fr)
         ttk.Label(box, text="Sigma (px):").pack(side="left")
-        sp = ttk.Spinbox(box, from_=1, to=64, textvariable=v_heat_sigma, width=6); sp.pack(side="left", padx=(6, 0))
-        _bind_help(sp, "heat_sigma", ex_help_lbl)
+        sp = ttk.Spinbox(box, from_=1, to=64, textvariable=v_heat_sigma, width=6); sp.pack(side="left", padx=(6,0))
+        _bind_help(sp, "heat_sigma", ex_help)
         return box
-    _row(ex_heat, "", _heat_sigma_row)
+    _row(ex_heat, "", _sigma_row)
 
     ttk.Separator(ex_heat, orient="horizontal").pack(fill="x", padx=4, pady=6)
 
-    def _heat_window_row(fr):
+    def _window_row(fr):
         box = ttk.Frame(fr)
         cb = ttk.Checkbutton(box, text="Use rolling window (minutes)", variable=v_heat_window_enabled); cb.pack(side="left")
-        _bind_help(cb, "heat_window_enabled", ex_help_lbl)
-        ttk.Label(box, text="Length (min):").pack(side="left", padx=(12, 4))
+        _bind_help(cb, "heat_window_enabled", ex_help)
+        ttk.Label(box, text="Length:").pack(side="left", padx=(12,4))
         ent = ttk.Entry(box, textvariable=v_heat_window_minutes, width=8); ent.pack(side="left")
-        _bind_help(ent, "heat_window_minutes", ex_help_lbl)
+        _bind_help(ent, "heat_window_minutes", ex_help)
         return box
-    _row(ex_heat, "", _heat_window_row)
+    _row(ex_heat, "", _window_row)
 
-    def _heat_decay_row(fr):
+    def _decay_row(fr):
         box = ttk.Frame(fr)
         ttk.Label(box, text="OR per-frame decay (0–1):").pack(side="left")
-        ent = ttk.Entry(box, textvariable=v_heat_decay, width=8); ent.pack(side="left", padx=(6, 0))
-        _bind_help(ent, "heat_decay", ex_help_lbl)
+        ent = ttk.Entry(box, textvariable=v_heat_decay, width=8); ent.pack(side="left", padx=(6,0))
+        _bind_help(ent, "heat_decay", ex_help)
         return box
-    _row(ex_heat, "", _heat_decay_row)
+    _row(ex_heat, "", _decay_row)
 
-    def _heat_save_row(fr):
+    def _save_row(fr):
         box = ttk.Frame(fr)
         ttk.Label(box, text="Save interval (s, 0=off):").pack(side="left")
-        ent = ttk.Entry(box, textvariable=v_heat_save_interval_s, width=8); ent.pack(side="left", padx=(6, 0))
-        _bind_help(ent, "heat_save_interval_s", ex_help_lbl)
+        ent = ttk.Entry(box, textvariable=v_heat_save_interval_s, width=8); ent.pack(side="left", padx=(6,0))
+        _bind_help(ent, "heat_save_interval_s", ex_help)
         return box
-    _row(ex_heat, "", _heat_save_row)
+    _row(ex_heat, "", _save_row)
 
-    # ────────────────── bottom action bar (outside tabs) ──────────────────
+    # ───────────────────── bottom bar ─────────────────────
     def _collect() -> dict:
         return {
-            # Detection/Tracking/Hysteresis
+            # main
             "imgsz": _int(v_imgsz, defaults["imgsz"]),
             "conf": _float(v_conf, defaults["conf"]),
             "iou": _float(v_iou, defaults["iou"]),
@@ -518,68 +447,67 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
             "line_min_gap": _int(v_line_gap, defaults["line_min_gap"]),
             "line_min_sep": _int(v_line_sep, defaults["line_min_sep"]),
             "zone_min_gap": _int(v_zone_gap, defaults["zone_min_gap"]),
-            # Overlay/Trace/Anchor/Ghost
+
             "overlay_mode": str(app.overlay_mode.get()),
             "anchor_mode": _str(app.anchor_mode, defaults["anchor_mode"]),
             "ghost_margin": _int(app.ghost_margin, defaults["ghost_margin"]),
             "trace_enabled": bool(app.trace_enabled.get()),
             "trace_len": _int(app.trace_len, defaults["trace_len"]),
-            # Colors/Thickness
+
             "trace_color": _str(v_trace_color, defaults["trace_color"]),
             "trace_thickness": _int(v_trace_thick, defaults["trace_thickness"]),
             "overlay_frame_color": _str(v_frame_color, defaults["overlay_frame_color"]),
             "overlay_frame_thickness": _int(v_frame_thick, defaults["overlay_frame_thickness"]),
-            # Alerts
+
             "alert_enabled": bool(app.alert_enabled.get()),
             "alert_sound": _str(app.alert_sound, defaults["alert_sound"]),
             "alert_loop": bool(app.alert_loop.get()),
             "alert_freeze_s": _int(app.alert_freeze_s, defaults["alert_freeze_s"]),
-            "alert_zone_inside": _int(v_alert_inside, defaults["alert_zone_inside"]),
-            # Extras
-            "hud_scale": max(0.5, min(2.0, _int(v_hud_scale, 100) / 100.0)),
+            "alert_zone_inside": int(v_alert_inside.get()),
+
+            "hud_scale": max(0.5, min(2.0, _int(v_hud_scale, 100)/100.0)),
             "snapshot_on_events": bool(v_snapshot_events.get()),
-            # Heatmap (new)
-            "heat_enabled": bool(v_heat_enabled.get()),
+
+            # heatmap
+            "heat_enabled": bool(int(v_heat_enabled.get()) == 1),
             "heat_overlay_on_start": bool(v_heat_overlay.get()),
             "heat_use_aoi": bool(v_heat_use_aoi.get()),
             "heat_alpha": float(v_heat_alpha.get()),
+            "heat_gamma": float(v_heat_gamma.get()),
+            "heat_zero_thresh": float(v_heat_zero_thresh.get()),
             "heat_sigma": int(v_heat_sigma.get()),
             "heat_window_enabled": bool(v_heat_window_enabled.get()),
             "heat_window_minutes": float(v_heat_window_minutes.get()),
             "heat_decay": float(v_heat_decay.get()),
             "heat_save_interval_s": int(v_heat_save_interval_s.get()),
-            "_meta": {"version": 7, "saved_at": datetime.now().isoformat(timespec="seconds")},
+            # NEW
+            "heat_gain": float(v_heat_gain.get()),
+            "heat_memory_mult": float(v_heat_memory_mult.get()),
+            "_meta": {"version": 9, "saved_at": datetime.now().isoformat(timespec="seconds")},
         }
 
-    # bottom bar
     bar = ttk.Frame(root); bar.pack(side="bottom", fill="x", padx=8, pady=8)
-
-    def _apply():
-        app.adv_params.update(_collect())  # silent apply
-    ttk.Button(bar, text="Apply", command=_apply).pack(side="left")
+    ttk.Button(bar, text="Apply", command=lambda: app.adv_params.update(_collect())).pack(side="left")
 
     def _save_preset():
         data = _collect()
-        initialdir = str(_presets_dir())
-        fname = f"adv_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         path = filedialog.asksaveasfilename(
             title="Save preset",
-            initialdir=initialdir, defaultextension=".json", initialfile=fname,
-            filetypes=[("JSON preset", "*.json"), ("All files", "*.*")],
+            initialdir=str(_dir("presets")), defaultextension=".json",
+            initialfile=f"adv_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            filetypes=[("JSON preset", "*.json"), ("All files", "*.*")]
         )
         if not path: return
         try:
             with open(path, "w", encoding="utf-8") as f: json.dump(data, f, indent=2)
         except Exception as e:
             messagebox.showerror("Preset", f"Could not save:\n{e}")
-    ttk.Button(bar, text="Save preset…", command=_save_preset).pack(side="left", padx=(8, 0))
 
     def _load_preset():
-        initialdir = str(_presets_dir())
         path = filedialog.askopenfilename(
             title="Load preset",
-            initialdir=initialdir,
-            filetypes=[("JSON preset", "*.json"), ("All files", "*.*")],
+            initialdir=str(_dir("presets")),
+            filetypes=[("JSON preset", "*.json"), ("All files", "*.*")]
         )
         if not path: return
         try:
@@ -587,64 +515,60 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         except Exception as e:
             messagebox.showerror("Preset", f"Could not read file:\n{e}"); return
 
-        def _getk(*names, default=None):
-            for n in names:
-                if n in d: return d[n]
-            return default
+        def G(name, default):
+            return d.get(name, default)
 
         # main
-        v_imgsz.set(str(_getk("imgsz", default=defaults["imgsz"])))
-        v_conf.set(str(_getk("conf", default=defaults["conf"])))
-        v_iou.set(str(_getk("iou", default=defaults["iou"])))
-        v_frame_skip.set(str(_getk("frame_skip", default=defaults["frame_skip"])))
-        v_track_buffer.set(str(_getk("track_buffer", default=defaults["track_buffer"])))
-        v_match_thresh.set(str(_getk("match_thresh", default=defaults["match_thresh"])))
-        v_min_hits.set(str(_getk("min_hits", default=defaults["min_hits"])))
-        v_line_gap.set(str(_getk("line_min_gap", default=defaults["line_min_gap"])))
-        v_line_sep.set(str(_getk("line_min_sep", "line_min_sep_px", default=defaults["line_min_sep"])))
-        v_zone_gap.set(str(_getk("zone_min_gap", default=defaults["zone_min_gap"])))
+        v_imgsz.set(str(G("imgsz", defaults["imgsz"])))
+        v_conf.set(str(G("conf", defaults["conf"])))
+        v_iou.set(str(G("iou", defaults["iou"])))
+        v_frame_skip.set(str(G("frame_skip", defaults["frame_skip"])))
+        v_track_buffer.set(str(G("track_buffer", defaults["track_buffer"])))
+        v_match_thresh.set(str(G("match_thresh", defaults["match_thresh"])))
+        v_min_hits.set(str(G("min_hits", defaults["min_hits"])))
+        v_line_gap.set(str(G("line_min_gap", defaults["line_min_gap"])))
+        v_line_sep.set(str(G("line_min_sep", defaults["line_min_sep"])))
+        v_zone_gap.set(str(G("zone_min_gap", defaults["zone_min_gap"])))
 
-        app.overlay_mode.set(str(_getk("overlay_mode", default=defaults["overlay_mode"])))
-        app.anchor_mode.set(str(_getk("anchor_mode", default=defaults["anchor_mode"])))
-        app.ghost_margin.set(str(_getk("ghost_margin", default=defaults["ghost_margin"])))
+        app.overlay_mode.set(str(G("overlay_mode", defaults["overlay_mode"])))
+        app.anchor_mode.set(str(G("anchor_mode", defaults["anchor_mode"])))
+        app.ghost_margin.set(str(G("ghost_margin", defaults["ghost_margin"])))
+        app.trace_enabled.set(bool(G("trace_enabled", defaults["trace_enabled"])))
+        app.trace_len.set(str(G("trace_len", defaults["trace_len"])))
+        v_trace_color.set(str(G("trace_color", defaults["trace_color"])))
+        v_trace_thick.set(str(G("trace_thickness", defaults["trace_thickness"])))
+        v_frame_color.set(str(G("overlay_frame_color", defaults["overlay_frame_color"])))
+        v_frame_thick.set(str(G("overlay_frame_thickness", defaults["overlay_frame_thickness"])))
 
-        app.trace_enabled.set(bool(_getk("trace_enabled", default=defaults["trace_enabled"])))
-        app.trace_len.set(str(_getk("trace_len", default=defaults["trace_len"])))
-        v_trace_color.set(str(_getk("trace_color", default=defaults["trace_color"])))
-        v_trace_thick.set(str(_getk("trace_thickness", default=defaults["trace_thickness"])))
-        v_frame_color.set(str(_getk("overlay_frame_color", "frame_color", default=defaults["overlay_frame_color"])))
-        v_frame_thick.set(str(_getk("overlay_frame_thickness", "frame_thickness", default=defaults["overlay_frame_thickness"])))
+        app.alert_enabled.set(bool(G("alert_enabled", defaults["alert_enabled"])))
+        app.alert_sound.set(str(G("alert_sound", defaults["alert_sound"])))
+        app.alert_loop.set(bool(G("alert_loop", defaults["alert_loop"])))
+        app.alert_freeze_s.set(int(G("alert_freeze_s", defaults["alert_freeze_s"])))
+        v_alert_inside.set(int(G("alert_zone_inside", defaults["alert_zone_inside"])))
 
-        app.alert_enabled.set(bool(_getk("alert_enabled", default=defaults["alert_enabled"])))
-        app.alert_sound.set(str(_getk("alert_sound", default=defaults["alert_sound"])))
-        app.alert_loop.set(bool(_getk("alert_loop", default=defaults["alert_loop"])))
-        app.alert_freeze_s.set(int(_getk("alert_freeze_s", default=defaults["alert_freeze_s"])))
-        v_alert_inside.set(int(_getk("alert_zone_inside", default=defaults["alert_zone_inside"])))
+        v_hud_scale.set(str(int(round(float(G("hud_scale", defaults["hud_scale"])) * 100))))
+        v_snapshot_events.set(bool(G("snapshot_on_events", defaults["snapshot_on_events"])))
 
-        v_hud_scale.set(str(int(round(float(_getk("hud_scale", default=defaults["hud_scale"])) * 100))))
-        v_snapshot_events.set(bool(_getk("snapshot_on_events", default=defaults["snapshot_on_events"])))
+        # heat
+        v_heat_enabled.set(1 if G("heat_enabled", defaults["heat_enabled"]) else 0)
+        v_heat_overlay.set(bool(G("heat_overlay_on_start", defaults["heat_overlay_on_start"])))
+        v_heat_use_aoi.set(bool(G("heat_use_aoi", defaults["heat_use_aoi"])))
+        v_heat_alpha.set(float(G("heat_alpha", defaults["heat_alpha"])))
+        v_heat_gamma.set(float(G("heat_gamma", defaults["heat_gamma"])))
+        v_heat_zero_thresh.set(float(G("heat_zero_thresh", defaults["heat_zero_thresh"])))
+        v_heat_sigma.set(int(G("heat_sigma", defaults["heat_sigma"])))
+        v_heat_window_enabled.set(bool(G("heat_window_enabled", defaults["heat_window_enabled"])))
+        v_heat_window_minutes.set(float(G("heat_window_minutes", defaults["heat_window_minutes"])))
+        v_heat_decay.set(float(G("heat_decay", defaults["heat_decay"])))
+        v_heat_save_interval_s.set(int(G("heat_save_interval_s", defaults["heat_save_interval_s"])))
+        # NEW
+        v_heat_gain.set(float(G("heat_gain", defaults["heat_gain"])))
+        v_heat_memory_mult.set(float(G("heat_memory_mult", defaults["heat_memory_mult"])))
 
-        # heatmap
-        v_heat_enabled.set(bool(_getk("heat_enabled", default=defaults["heat_enabled"])))
-        v_heat_overlay.set(bool(_getk("heat_overlay_on_start", default=defaults["heat_overlay_on_start"])))
-        v_heat_use_aoi.set(bool(_getk("heat_use_aoi", default=defaults["heat_use_aoi"])))
-        v_heat_alpha.set(float(_getk("heat_alpha", default=defaults["heat_alpha"])))
-        v_heat_sigma.set(int(_getk("heat_sigma", default=defaults["heat_sigma"])))
-        v_heat_window_enabled.set(bool(_getk("heat_window_enabled", default=defaults["heat_window_enabled"])))
-        v_heat_window_minutes.set(float(_getk("heat_window_minutes", default=defaults["heat_window_minutes"])))
-        v_heat_decay.set(float(_getk("heat_decay", default=defaults["heat_decay"])))
-        v_heat_save_interval_s.set(int(_getk("heat_save_interval_s", default=defaults["heat_save_interval_s"])))
+        app.adv_params.update(_collect())
 
-        app.adv_params.update(_collect())  # silent apply
-
-    ttk.Button(bar, text="Load preset…", command=_load_preset).pack(side="left", padx=(8, 0))
-
-    def _close():
-        try:
-            if SoundPlayer and "player" in sound_player_ref and sound_player_ref["player"]:
-                sound_player_ref["player"].stop()
-        except Exception: pass
-        parent.winfo_toplevel().destroy()
-    ttk.Button(bar, text="Close", command=_close).pack(side="right")
+    ttk.Button(bar, text="Save preset…", command=_save_preset).pack(side="left", padx=(8,0))
+    ttk.Button(bar, text="Load preset…", command=_load_preset).pack(side="left", padx=(8,0))
+    ttk.Button(bar, text="Close", command=parent.winfo_toplevel().destroy).pack(side="right")
 
     return root

@@ -24,6 +24,7 @@ class DetectionHeatmap:
         self.HM = np.zeros((self.H, self.W), np.float32)
         self.mask_bool: Optional[np.ndarray] = None
 
+    # --- knobs ---------------------------------------------------------------
     def set_sigma(self, sigma: int):
         self.kernel = _gaussian_kernel2d(int(sigma))
         self.r = self.kernel.shape[0] // 2
@@ -40,6 +41,7 @@ class DetectionHeatmap:
             m = cv2.resize(m.astype(np.uint8), (self.W, self.H), interpolation=cv2.INTER_NEAREST).astype(bool)
         self.mask_bool = m
 
+    # --- accumulate ----------------------------------------------------------
     def add_points(self, pts: Iterable[Tuple[int, int]]):
         if pts is None:
             return
@@ -69,29 +71,66 @@ class DetectionHeatmap:
             else:
                 roi += add
 
-    def _colorize(self, normalize: bool = True, colormap: int = cv2.COLORMAP_JET) -> np.ndarray:
-        hm = self.HM
+    # --- rendering -----------------------------------------------------------
+    def _normalized(self) -> np.ndarray:
+        mx = float(self.HM.max())
+        if mx < 1e-6:
+            return np.zeros_like(self.HM, np.float32)
+        return (self.HM / mx).astype(np.float32)
+
+    def colorize_bgr(self, normalize: bool = True, colormap: int = cv2.COLORMAP_JET) -> np.ndarray:
+        """Classic BGR heatmap (opaque)."""
         if normalize:
-            mx = float(hm.max())
-            if mx < 1e-6:
-                norm = np.zeros_like(hm, np.uint8)
-            else:
-                norm = np.clip(255.0 * (hm / mx), 0, 255).astype(np.uint8)
+            norm = (self._normalized() * 255.0).astype(np.uint8)
         else:
-            norm = np.clip(hm, 0, 255).astype(np.uint8)
+            norm = np.clip(self.HM, 0, 255).astype(np.uint8)
         return cv2.applyColorMap(norm, colormap)
 
-    def render_overlay(self, frame_bgr: np.ndarray, alpha: float = 0.5,
-                       normalize: bool = True, colormap: int = cv2.COLORMAP_JET) -> np.ndarray:
-        alpha = float(max(0.0, min(alpha, 1.0)))
-        cm = self._colorize(normalize=normalize, colormap=colormap)
-        if cm.shape[:2] != frame_bgr.shape[:2]:
-            cm = cv2.resize(cm, (frame_bgr.shape[1], frame_bgr.shape[0]), interpolation=cv2.INTER_LINEAR)
-        return cv2.addWeighted(frame_bgr, 1.0 - alpha, cm, alpha, 0.0)
+    def colorize_rgba(self, alpha_scale: float = 1.0, gamma: float = 1.0,
+                      thresh: float = 1e-6, colormap: int = cv2.COLORMAP_JET) -> np.ndarray:
+        """
+        Transparent zeros: returns BGRA where A = alpha_scale * pow(norm, gamma).
+        thresh: values <= thresh become alpha=0 (true 'no data').
+        """
+        norm = self._normalized()
+        if gamma != 1.0:
+            norm = np.power(norm, float(max(1e-6, gamma)))
+        a = np.where(norm > float(thresh), np.clip(norm * float(alpha_scale), 0, 1.0), 0.0).astype(np.float32)
 
+        cm = cv2.applyColorMap(np.clip((norm * 255.0).astype(np.uint8), 0, 255), colormap)
+        # Build BGRA with alpha in 0..255
+        a8 = (a * 255.0).astype(np.uint8)
+        return np.dstack([cm, a8])  # BGRA
+
+    def render_overlay_masked(self, frame_bgr: np.ndarray, alpha: float = 0.5,
+                              gamma: float = 1.0, thresh: float = 1e-6,
+                              colormap: int = cv2.COLORMAP_JET) -> np.ndarray:
+        """
+        Per-pixel alpha blend: only pixels with heat > thresh affect the frame.
+        No blue cast on the background.
+        """
+        h, w = frame_bgr.shape[:2]
+        rgba = self.colorize_rgba(alpha_scale=float(alpha), gamma=gamma, thresh=thresh, colormap=colormap)
+        if rgba.shape[0] != h or rgba.shape[1] != w:
+            rgba = cv2.resize(rgba, (w, h), interpolation=cv2.INTER_LINEAR)
+
+        rgb = rgba[:, :, :3].astype(np.float32)
+        a = (rgba[:, :, 3:4].astype(np.float32) / 255.0)  # HxWx1
+        base = frame_bgr.astype(np.float32)
+        out = base * (1.0 - a) + rgb * a
+        return np.clip(out, 0, 255).astype(np.uint8)
+
+    # --- save ----------------------------------------------------------------
     def save_png(self, path, normalize: bool = True, colormap: int = cv2.COLORMAP_JET) -> bool:
-        cm = self._colorize(normalize=normalize, colormap=colormap)
-        return bool(cv2.imwrite(str(path), cm))
+        """Opaque BGR PNG (kept for backward compatibility)."""
+        bgr = self.colorize_bgr(normalize=normalize, colormap=colormap)
+        return bool(cv2.imwrite(str(path), bgr))
+
+    def save_png_rgba(self, path, alpha_scale: float = 1.0, gamma: float = 1.0, thresh: float = 1e-6,
+                      colormap: int = cv2.COLORMAP_JET) -> bool:
+        """Transparent zeros PNG (BGRA)."""
+        rgba = self.colorize_rgba(alpha_scale=alpha_scale, gamma=gamma, thresh=thresh, colormap=colormap)
+        return bool(cv2.imwrite(str(path), rgba))
 
 def build_mask_from_zones(zones: List[Dict], width: int, height: int) -> np.ndarray:
     H, W = int(height), int(width)
@@ -110,6 +149,6 @@ def build_mask_from_zones(zones: List[Dict], width: int, height: int) -> np.ndar
             p = pts.reshape(-1, 2)
             for i in range(len(p) - 1):
                 x1, y1 = map(int, p[i].tolist())
-                x2, y2 = map(int, p[i + 1].tolist())
+                x2, y2 = map(int, p[i + 1]).tolist()
                 cv2.line(mask, (x1, y1), (x2, y2), 1, thickness=max(1, thick))
     return mask
