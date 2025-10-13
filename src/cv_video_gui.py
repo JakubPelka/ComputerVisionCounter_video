@@ -7,6 +7,9 @@ from tkinter import filedialog, messagebox, ttk
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
+from cv_video_advanced_ui import build_advanced_settings
+
+
 
 # we use this to discover a first frame automatically if the caller didn't pass one
 from cv_video_core import SUPPORTED_VID_EXTS  # (.mp4, .mov, ...)
@@ -528,3 +531,13 @@ class AppUIMixin:
         tk.Label(f, text=label, width=26, anchor="w").pack(side="left")
         tk.Entry(f, textvariable=var).pack(side="left", fill="x", expand=True, padx=6)
         tk.Button(f, text="Browse…", command=cmd).pack(side="left")
+        
+    def open_advanced(self):
+        """Open your full Advanced panel (with Extras ▸ Heatmap) and persist selections."""
+        top = tk.Toplevel(self)
+        top.title("Advanced options")
+        top.transient(self)
+        try: top.grab_set()
+        except Exception: pass
+        frame = build_advanced_settings(top, self)
+        frame.pack(fill="both", expand=True)

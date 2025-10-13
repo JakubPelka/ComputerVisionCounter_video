@@ -1,8 +1,8 @@
-# cv_video_run.py — robust overlay + filtered classes + stable tracking + unique run files
+# cv_video_run.py — robust overlay + filtered classes + stable tracking + unique run files + HEATMAP
 from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
-import time, re as _re, inspect
+import time, re as _re, inspect, math
 import cv2, numpy as np, pandas as pd
 
 from cv_video_gui import CounterEditor
@@ -20,16 +20,19 @@ from cv_video_geom import (
 from cv_video_hud import draw_lines_zones, draw_trails, draw_counts_panel
 from cv_video_sound import SoundPlayer
 
-# NEW: global "Now / Max this run" counters (small, separate module)
+# Global counters (previous step)
 from cv_video_stats import StatsAggregator
 from cv_video_hud_extras import draw_run_counters
+
+# Heatmap (new)
+from cv_video_heatmap import DetectionHeatmap, build_mask_from_zones
 
 try:
     import supervision as sv  # optional
 except Exception:
     sv = None
 
-# ----------------- small helpers -----------------
+# ----------------- helpers -----------------
 _URL_RE = _re.compile(r'^\s*(rtsp|rtsps|rtmp|http|https)://', flags=_re.I)
 def _is_stream_source(src):
     if isinstance(src, (int,)): return True
@@ -198,12 +201,8 @@ def _writer_write_safe(writer, ov, fallback_frame, expected_WH, app):
             except Exception: pass
             return False
 
-# ---------- tracker helpers (robust across Supervision versions) ----------
+# ---------- tracker helpers ----------
 def _make_bytetrack(conf, track_buffer, match_thresh, min_hits, fps):
-    """
-    Create a Supervision ByteTrack with only supported kwargs.
-    Returns a tracker or None if not available.
-    """
     if sv is None or not hasattr(sv, "ByteTrack"):
         return None
     try:
@@ -235,10 +234,6 @@ def _make_bytetrack(conf, track_buffer, match_thresh, min_hits, fps):
                 return None
 
 def _track_update(tracker, boxes, scores, cids):
-    """
-    Update tracker and return tracked boxes/scores/classes/ids.
-    Robust to different return types across Supervision versions.
-    """
     if tracker is None or boxes is None or boxes.shape[0] == 0 or sv is None:
         return boxes, scores, cids, None
     try:
@@ -255,7 +250,6 @@ def _track_update(tracker, boxes, scores, cids):
         except Exception:
             continue
 
-        # Case A: Detections with tracker_id
         if hasattr(tracked, "xyxy") and getattr(tracked, "tracker_id", None) is not None:
             t_boxes = tracked.xyxy.astype(int)
             t_ids   = tracked.tracker_id.astype(int)
@@ -267,7 +261,6 @@ def _track_update(tracker, boxes, scores, cids):
                 t_scores = (scores[:len(t_ids)] if scores is not None and len(scores) >= len(t_ids) else None)
             return t_boxes, t_scores, t_cids, t_ids
 
-        # Case B: list of track objects with track_id/tlbr
         if isinstance(tracked, (list, tuple)) and len(tracked) > 0 and hasattr(tracked[0], "track_id"):
             t_boxes, t_ids = [], []
             for t in tracked:
@@ -420,6 +413,7 @@ def run(app, sources, outp: Path, selected_idx):
         ev_dir   = ensure_dir(outp / "events")
         summ_dir = ensure_dir(outp / "summary")
         cnt_dir  = ensure_dir(outp / "counters")
+        heat_dir = ensure_dir(outp / "heatmap")
         ensure_dir(outp / "temp")
 
         p = getattr(app, "adv_params", {}) or {}
@@ -439,13 +433,13 @@ def run(app, sources, outp: Path, selected_idx):
         anchor_mode  = getattr(app, "anchor_mode", None).get() if hasattr(app, "anchor_mode") else str(p.get("anchor_mode", "center"))
         ghost_margin = int(getattr(app, "ghost_margin", None).get()) if hasattr(app, "ghost_margin") else int(p.get("ghost_margin", 24))
 
-        # HUD scaling
-        try: hud_scale = float(p.get("hud_scale", 1.0))
-        except Exception: hud_scale = 1.0
+        # HUD scaling passthrough
         try:
+            hud_scale = float(p.get("hud_scale", 1.0))
             from cv_video_hud import HUD_SCALE_FACTOR
             HUD_SCALE_FACTOR[0] = hud_scale
-        except Exception: pass
+        except Exception:
+            pass
 
         frame_color = _parse_color(p.get("overlay_frame_color", None))
         frame_thickness = int(p.get("overlay_frame_thickness", 2)) if str(p.get("overlay_frame_thickness","")).strip() != "" else 2
@@ -507,18 +501,13 @@ def run(app, sources, outp: Path, selected_idx):
                 editor = CounterEditor(app, frame_bgr=first_frame, default_cfg_path=default_cfg_path, live_cap=None)
                 result, aborted = editor.run_modal()
 
-            # PATCH: allow "OK" with empty config (no AOI) -> continue run
-            if aborted:
+            # allow empty config (no AOI)
+            if aborted or result is None:
                 app._log("[INFO] Counter configuration cancelled — aborting run.")
                 cap.release(); return
-            if result is None:
-                app._log("[INFO] No configuration payload — aborting run.")
-                cap.release(); return
 
-            # unified run tag (used for snapshots, csv, json)
             run_tag = datetime.fromtimestamp(start_epoch).strftime("%Y%m%d_%H%M%S")
 
-            # snapshots
             snap_enabled = bool(p.get("snapshot_on_events", False))
             snap_dir = ensure_dir(snap_root / f"{base_stem}_{run_tag}") if snap_enabled else None
 
@@ -531,7 +520,6 @@ def run(app, sources, outp: Path, selected_idx):
                 app._log(f"[ERR] Cannot open VideoWriter: {src_name}")
                 cap.release(); continue
 
-            # tracker (robust init across Supervision versions)
             tracker = _make_bytetrack(conf, track_buffer, match_thresh, min_hits, fps)
 
             last_anchor = {}
@@ -544,7 +532,7 @@ def run(app, sources, outp: Path, selected_idx):
             ev_i_saved = 0
             app._alert_state = {"last_ms": 0, "looping": False}
 
-            # NEW: per-source global counters (Now / Max this run)
+            # Global counters per-source
             names_obj = getattr(app, "names", {})
             if isinstance(names_obj, dict):
                 max_id = max(names_obj.keys()) if names_obj else -1
@@ -556,6 +544,31 @@ def run(app, sources, outp: Path, selected_idx):
             else:
                 id2name = []
             stats = StatsAggregator(id2name, selected_ids=selected_class_ids_set or None)
+
+            # --- HEATMAP: config, init, dynamic decay/window ---
+            heat_alpha = float(p.get("heat_alpha", 0.5))
+            heat_sigma = int(p.get("heat_sigma", 8))
+            heat_decay = float(p.get("heat_decay", 0.02))  # used only if not window-mode
+            heat_use_aoi = bool(p.get("heat_use_aoi", False))
+            heat_enabled = bool(p.get("heat_enabled", False))          # accumulate?
+            heat_overlay_on = bool(p.get("heat_overlay_on_start", heat_enabled))  # show?
+            heat_window_enabled = bool(p.get("heat_window_enabled", False))
+            heat_window_minutes = float(p.get("heat_window_minutes", 5.0))
+            heat_save_interval_s = int(p.get("heat_save_interval_s", 0))  # 0 = don't save periodically
+            last_heat_save_sec = -1.0
+
+            heatmap = DetectionHeatmap(W, H, sigma=heat_sigma, decay=heat_decay)
+            if heat_window_enabled and heat_window_minutes > 0 and fps > 0:
+                # per-frame decay so that ~1/e weight after window_seconds
+                window_s = max(1.0, 60.0 * heat_window_minutes)
+                per_frame_decay = 1.0 - math.exp(-1.0 / (fps * window_s))
+                heatmap.set_decay(per_frame_decay)
+            if heat_use_aoi and zones_cfg:
+                try:
+                    mask = build_mask_from_zones(zones_cfg, W, H)
+                    heatmap.set_mask(mask)
+                except Exception:
+                    pass
 
             def _frame_timing(is_stream_local: bool):
                 if is_stream_local:
@@ -571,23 +584,23 @@ def run(app, sources, outp: Path, selected_idx):
                     sec = float(cur_idx)/float(fps) if (cur_idx and fps>0) else 0.0
                 return sec, _fmt_timecode(sec), ""
 
+            cur_time_sec = 0.0  # updated every frame
+
             def _handle_frame(frame, frame_idx):
-                # Inference
+                nonlocal cur_time_sec
                 res = app.model(frame, imgsz=imgsz, conf=conf, iou=iou, device=device, verbose=False)
                 boxes, scores, cids = _parse_ultra_results(res)
 
-                # Filter by selected classes
                 if selected_class_ids_set and boxes.shape[0] > 0:
-                    mask = np.isin(cids, np.fromiter(selected_class_ids_set, dtype=int))
-                    boxes = boxes[mask]; scores = scores[mask]; cids = cids[mask]
+                    mask_keep = np.isin(cids, np.fromiter(selected_class_ids_set, dtype=int))
+                    boxes = boxes[mask_keep]; scores = scores[mask_keep]; cids = cids[mask_keep]
 
-                # TRACKING (stable IDs)
                 boxes, scores, cids, det_ids = _track_update(tracker, boxes, scores, cids)
-                if det_ids is None:  # fallback
+                if det_ids is None:
                     det_ids = np.arange(1, boxes.shape[0] + 1, dtype=int)
 
-                # Time labels
                 event_time_sec, timecode_str, clock_str = _frame_timing(is_stream)
+                cur_time_sec = float(event_time_sec)
                 names = app.names if hasattr(app, 'names') else {}
 
                 anchors = _update_counts_and_alerts(
@@ -602,11 +615,11 @@ def run(app, sources, outp: Path, selected_idx):
                     sound_player, alert_loop
                 )
 
-                # Overlays
                 ov = frame.copy()
                 ov = _draw_detections_safe(ov, boxes, scores, cids, det_ids, names, overlay_mode)
                 draw_lines_zones(ov, lines_cfg, zones_cfg, frame_color=frame_color, frame_thickness=frame_thickness)
 
+                # trails
                 if trails is not None:
                     for tid, a in zip(det_ids, anchors):
                         dq = trails.get(int(tid))
@@ -619,7 +632,18 @@ def run(app, sources, outp: Path, selected_idx):
                                 trace_color=_parse_color(p.get("trace_color", None)),
                                 trace_thickness=int(p.get("trace_thickness", 2)) if str(p.get("trace_thickness","")).strip() != "" else 2)
 
-                # NEW: Global Now / Max this run (bottom-left), AOI optional
+                # --- HEATMAP accumulate + optional overlay ---
+                try:
+                    if heat_enabled and boxes is not None and len(boxes) > 0:
+                        cx = ((boxes[:, 0] + boxes[:, 2]) // 2).astype(int)
+                        cy = ((boxes[:, 1] + boxes[:, 3]) // 2).astype(int)
+                        heatmap.add_points(zip(cx.tolist(), cy.tolist()))
+                    if heat_overlay_on:
+                        ov = heatmap.render_overlay(ov, alpha=heat_alpha, normalize=True)
+                except Exception:
+                    pass
+
+                # Global Now/Max HUD
                 try:
                     stats.update_from_cids(cids)
                     now_counts = stats.now_named()
@@ -629,7 +653,7 @@ def run(app, sources, outp: Path, selected_idx):
                 except Exception:
                     pass
 
-                # Existing BR panel with lines/zones counters (unchanged)
+                # Existing BR panel
                 draw_counts_panel(ov, lines_cfg, line_counts, zones_cfg, zone_counts, anchor="br", app=app)
 
                 # snapshots on new events
@@ -652,6 +676,7 @@ def run(app, sources, outp: Path, selected_idx):
                         ev_i_saved = total_ev
                 return ov
 
+            # first-frame pass for files
             processed = 0
             if not is_stream and 'first_frame' in locals() and first_frame is not None:
                 if (processed % stride) == 0:
@@ -660,6 +685,7 @@ def run(app, sources, outp: Path, selected_idx):
                     _preview(app, ov, processed, fps, total_frames)
                 processed += 1
 
+            last_heat_save_sec = -1.0
             while True:
                 if app.abort_event.is_set(): break
                 ok, frame = cap.read()
@@ -669,7 +695,33 @@ def run(app, sources, outp: Path, selected_idx):
                 ov = _handle_frame(frame, processed)
                 _writer_write_safe(writer, _ensure_bgr(ov), frame, (W, H), app)
                 _preview(app, ov, processed, fps, total_frames)
+
+                # periodic heatmap save to /heatmap + output root
+                if heat_enabled and heat_save_interval_s > 0:
+                    if (last_heat_save_sec < 0.0) or (cur_time_sec - last_heat_save_sec >= heat_save_interval_s):
+                        last_heat_save_sec = cur_time_sec
+                        try:
+                            hm_path = heat_dir / f"{base_stem}_{run_tag}_{int(cur_time_sec):06d}s_heatmap.png"
+                            hm_ov_path = heat_dir / f"{base_stem}_{run_tag}_{int(cur_time_sec):06d}s_heat_overlay.png"
+                            heatmap.save_png(hm_path, normalize=True)
+                            if isinstance(ov, np.ndarray):
+                                hm_ov = heatmap.render_overlay(ov, alpha=heat_alpha, normalize=True)
+                                cv2.imwrite(str(hm_ov_path), hm_ov)
+                            # “latest” copies to output root:
+                            cv2.imwrite(str((outp / f"{base_stem}_heatmap_latest.png")), cv2.imread(str(hm_path)))
+                            if 'hm_ov' in locals():
+                                cv2.imwrite(str((outp / f"{base_stem}_heatmap_overlay_latest.png")), hm_ov)
+                            app._log(f"[HEAT] periodic save @ {cur_time_sec:.1f}s → {hm_path.name}")
+                        except Exception as e:
+                            app._log(f"[WARN] periodic heatmap save failed: {e}")
+
                 processed += 1
+
+                # live keyboard (overlay toggle)
+                k = cv2.waitKey(1) & 0xFF
+                if k in (27, ord('q')): break
+                elif k == ord('m'):      # toggle only the overlay; accumulation continues
+                    heat_overlay_on = not heat_overlay_on
 
             try:
                 sound_player.stop()
@@ -679,12 +731,10 @@ def run(app, sources, outp: Path, selected_idx):
             cap.release(); writer.release()
 
             # === SAVE RESULTS ===
-            # 1) Events CSV (per-event rows)
             ev_df = pd.DataFrame(events)
             ev_path = save_csv_collision(ev_df, ev_dir / f"{base_stem}_{run_tag}_events.csv")
             app._log(f"Saved events: {ev_path}")
 
-            # 2) Summary JSON (run metadata + counters)
             summary = {
                 "source": src_name,
                 "run_tag": run_tag,
@@ -701,40 +751,60 @@ def run(app, sources, outp: Path, selected_idx):
                     "alert_zone_inside": int(p.get("alert_zone_inside", 1)),
                     "alert_sound": alert_sound_path,
                     "alert_loop": alert_loop,
-                    "alert_freeze_s": int(alert_freeze_ms/1000)
+                    "alert_freeze_s": int(alert_freeze_ms/1000),
+                    # heat params
+                    "heat_enabled": bool(heat_enabled),
+                    "heat_overlay_on_start": bool(p.get("heat_overlay_on_start", heat_enabled)),
+                    "heat_alpha": float(heat_alpha),
+                    "heat_sigma": int(heat_sigma),
+                    "heat_decay": float(heat_decay),
+                    "heat_use_aoi": bool(heat_use_aoi),
+                    "heat_window_enabled": bool(heat_window_enabled),
+                    "heat_window_minutes": float(heat_window_minutes),
+                    "heat_save_interval_s": int(heat_save_interval_s),
                 }
             }
             sum_json_path = save_json_collision(summary, summ_dir / f"{base_stem}_{run_tag}_summary.json")
             app._log(f"Saved summary JSON: {sum_json_path}")
 
-            # 3) NEW: Summary CSV (run row + per-line + per-zone rows)
             sum_rows = []
-            # run-level row
             sum_rows.append({
                 "source": src_name, "run_tag": run_tag, "type": "run", "name": "__total__",
                 "frames": int(processed), "fps": float(fps),
                 "duration_s": float(processed / max(fps, 1e-6)),
                 "lines_cfg": len(lines_cfg), "zones_cfg": len(zones_cfg)
             })
-            # per-line rows
             for i, ln in enumerate(lines_cfg):
                 sum_rows.append({
                     "source": src_name, "run_tag": run_tag, "type": "line", "name": ln["name"],
                     "ab": int(line_counts[i]["ab"]), "ba": int(line_counts[i]["ba"]),
                     "total": int(line_counts[i]["ab"] + line_counts[i]["ba"])
                 })
-            # per-zone rows
             for i, zn in enumerate(zones_cfg):
                 sum_rows.append({
                     "source": src_name, "run_tag": run_tag, "type": "zone", "name": zn["name"],
                     "in": int(zone_counts[i]["in"]), "out": int(zone_counts[i]["out"]),
                     "delta": int(zone_counts[i]["in"] - zone_counts[i]["out"])
                 })
-
             sum_csv_df = pd.DataFrame(sum_rows)
             sum_csv_path = save_csv_collision(sum_csv_df, summ_dir / f"{base_stem}_{run_tag}_summary.csv")
             app._log(f"Saved summary CSV: {sum_csv_path}")
 
+            # final heatmap save (both places)
+            try:
+                hm_path = heat_dir / f"{base_stem}_{run_tag}_heatmap.png"
+                hm_ov_path = heat_dir / f"{base_stem}_{run_tag}_heatmap_overlay.png"
+                heatmap.save_png(hm_path, normalize=True)
+                if 'ov' in locals() and isinstance(ov, np.ndarray):
+                    hm_ov = heatmap.render_overlay(ov, alpha=heat_alpha, normalize=True)
+                    cv2.imwrite(str(hm_ov_path), hm_ov)
+                # also put fresh copies in output root:
+                cv2.imwrite(str((outp / f"{base_stem}_heatmap_latest.png")), cv2.imread(str(hm_path)))
+                if 'hm_ov' in locals():
+                    cv2.imwrite(str((outp / f"{base_stem}_heatmap_overlay_latest.png")), hm_ov)
+                app._log(f"Saved heatmap: {hm_path.name} (+ latest copies in output root)")
+            except Exception as e:
+                app._log(f"[WARN] Heatmap save failed: {e}")
 
         app._set_progress(100.0, "Done.")
 

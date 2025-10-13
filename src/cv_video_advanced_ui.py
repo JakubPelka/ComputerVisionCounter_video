@@ -1,4 +1,4 @@
-# cv_video_advanced_ui.py — Advanced settings UI (fixed help width, grouped extras, tab styling)
+# cv_video_advanced_ui.py — Advanced settings UI (now with Extras ▸ Heatmap)
 from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -39,7 +39,7 @@ def _int(var, default=0) -> int:
     except Exception: return int(default)
 
 def _float(var, default=0.0) -> float:
-    try: return float(str(var.get()).strip().replace(",", "."))
+    try: return float(str(var.get()).strip().replace(",", "."))  # EU comma
     except Exception: return float(default)
 
 def _str(var, default="") -> str:
@@ -139,9 +139,20 @@ HELP = {
     "alert_freeze_s": "Cooldown between pings (only when looping is off).",
     "alert_zone_inside": "Alert when an object is inside the zone (1) or outside (0).",
 
-    # Extras
+    # Extras (HUD / snapshots)
     "hud_scale": "Size of the bottom-right HUD panel. 100% = default.",
     "snapshot_on_events": "Save an annotated snapshot on every line/zone event.",
+
+    # Heatmap (new)
+    "heat_enabled": "Accumulate detections into a heatmap over time.",
+    "heat_overlay_on_start": "Show the heatmap blended on top of the video. Toggle live with the 'm' key.",
+    "heat_use_aoi": "Restrict accumulation to your drawn zones (AOI). Off = whole frame.",
+    "heat_alpha": "Overlay opacity (0=only video, 1=only heatmap).",
+    "heat_sigma": "Blob size of each detection (px). Higher = smoother, larger blobs.",
+    "heat_window_enabled": "Use a rolling time window (recent minutes) instead of infinite accumulation.",
+    "heat_window_minutes": "Length of the rolling window in minutes.",
+    "heat_decay": "Alternative to window: per-frame decay in [0..1]. Higher = faster fading.",
+    "heat_save_interval_s": "Save heatmap PNG every N seconds (0 = disable periodic saves).",
 }
 
 def _bind_help(widget: tk.Widget, key: str, help_label: tk.Label):
@@ -170,11 +181,14 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
 
     # defaults snapshot
     defaults = {
+        # detection/tracking/hysteresis
         "imgsz": p.get("imgsz", 320), "conf": p.get("conf", 0.5), "iou": p.get("iou", 0.6),
         "frame_skip": p.get("frame_skip", 2), "track_buffer": p.get("track_buffer", 5),
         "match_thresh": p.get("match_thresh", 0.8), "min_hits": p.get("min_hits", 2),
         "line_min_gap": p.get("line_min_gap", 8), "line_min_sep": p.get("line_min_sep", 12),
         "zone_min_gap": p.get("zone_min_gap", 6),
+
+        # overlay / trace / anchor
         "live_preview": p.get("live_preview", True),
         "trace_enabled": p.get("trace_enabled", True), "trace_len": p.get("trace_len", 24),
         "overlay_mode": p.get("overlay_mode", "centroid"),
@@ -182,11 +196,26 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         "trace_color": p.get("trace_color", "auto"), "trace_thickness": p.get("trace_thickness", 2),
         "overlay_frame_color": p.get("overlay_frame_color", "auto"),
         "overlay_frame_thickness": p.get("overlay_frame_thickness", 2),
+
+        # alerts
         "alert_enabled": p.get("alert_enabled", False), "alert_sound": p.get("alert_sound", ""),
         "alert_loop": p.get("alert_loop", True), "alert_freeze_s": p.get("alert_freeze_s", 2),
         "alert_zone_inside": p.get("alert_zone_inside", 1),
+
+        # extras
         "hud_scale": float(p.get("hud_scale", 1.0)),
         "snapshot_on_events": bool(p.get("snapshot_on_events", False)),
+
+        # heatmap (new)
+        "heat_enabled": p.get("heat_enabled", False),
+        "heat_overlay_on_start": p.get("heat_overlay_on_start", False),
+        "heat_use_aoi": p.get("heat_use_aoi", False),
+        "heat_alpha": p.get("heat_alpha", 0.5),
+        "heat_sigma": p.get("heat_sigma", 8),
+        "heat_window_enabled": p.get("heat_window_enabled", False),
+        "heat_window_minutes": p.get("heat_window_minutes", 5.0),
+        "heat_decay": p.get("heat_decay", 0.02),
+        "heat_save_interval_s": p.get("heat_save_interval_s", 0),
     }
 
     # tk variables (re-use if present)
@@ -230,6 +259,17 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     # Extras
     v_hud_scale       = _ensure("v_hud_scale", tk.StringVar, str(int(round(float(defaults["hud_scale"]) * 100))))
     v_snapshot_events = _ensure("snapshot_on_events", tk.BooleanVar, bool(defaults["snapshot_on_events"]))
+
+    # Heatmap (local vars; persisted via _collect into adv_params)
+    v_heat_enabled          = tk.BooleanVar(value=bool(defaults["heat_enabled"]))
+    v_heat_overlay          = tk.BooleanVar(value=bool(defaults["heat_overlay_on_start"]))
+    v_heat_use_aoi          = tk.BooleanVar(value=bool(defaults["heat_use_aoi"]))
+    v_heat_alpha            = tk.DoubleVar(value=float(defaults["heat_alpha"]))
+    v_heat_sigma            = tk.IntVar(value=int(defaults["heat_sigma"]))
+    v_heat_window_enabled   = tk.BooleanVar(value=bool(defaults["heat_window_enabled"]))
+    v_heat_window_minutes   = tk.DoubleVar(value=float(defaults["heat_window_minutes"]))
+    v_heat_decay            = tk.DoubleVar(value=float(defaults["heat_decay"]))
+    v_heat_save_interval_s  = tk.IntVar(value=int(defaults["heat_save_interval_s"]))
 
     # ────────────────── outer container: notebook + bottom bar ──────────────────
     root = ttk.Frame(parent); root.pack(fill="both", expand=True)
@@ -394,10 +434,75 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     _, e = _row(ex_hud, "HUD size (%)", _hud_spin); _bind_help(e, "hud_scale", ex_help_lbl)
 
     # Snapshots group
-    ex_snap = ttk.LabelFrame(ex_left, text="Snapshots"); ex_snap.pack(fill="x", padx=6, pady=(4, 6))
+    ex_snap = ttk.LabelFrame(ex_left, text="Snapshots"); ex_snap.pack(fill="x", padx=6, pady=(4, 4))
     def _snap_row(fr):
         return ttk.Checkbutton(fr, text="Save snapshot on events", variable=v_snapshot_events)
     _, cb = _row(ex_snap, "", _snap_row); _bind_help(cb, "snapshot_on_events", ex_help_lbl)
+
+    # Heatmap group (NEW)
+    ex_heat = ttk.LabelFrame(ex_left, text="Heatmap"); ex_heat.pack(fill="x", padx=6, pady=(4, 6))
+
+    def _heat_enable_row(fr):
+        box = ttk.Frame(fr)
+        cb1 = ttk.Checkbutton(box, text="Enable accumulation", variable=v_heat_enabled); cb1.pack(side="left")
+        _bind_help(cb1, "heat_enabled", ex_help_lbl)
+        cb2 = ttk.Checkbutton(box, text="Show overlay on start", variable=v_heat_overlay); cb2.pack(side="left", padx=(12, 0))
+        _bind_help(cb2, "heat_overlay_on_start", ex_help_lbl)
+        return box
+    _row(ex_heat, "", _heat_enable_row)
+
+    def _heat_scope_row(fr):
+        box = ttk.Frame(fr)
+        cb = ttk.Checkbutton(box, text="Restrict to zones (AOI mask)", variable=v_heat_use_aoi)
+        cb.pack(side="left")
+        _bind_help(cb, "heat_use_aoi", ex_help_lbl)
+        return box
+    _row(ex_heat, "", _heat_scope_row)
+
+    def _heat_alpha_row(fr):
+        box = ttk.Frame(fr)
+        ttk.Label(box, text="Alpha (0–1):").pack(side="left")
+        sc = ttk.Scale(box, from_=0.0, to=1.0, variable=v_heat_alpha, orient="horizontal", length=180)
+        sc.pack(side="left", padx=(6, 0))
+        _bind_help(sc, "heat_alpha", ex_help_lbl)
+        return box
+    _row(ex_heat, "", _heat_alpha_row)
+
+    def _heat_sigma_row(fr):
+        box = ttk.Frame(fr)
+        ttk.Label(box, text="Sigma (px):").pack(side="left")
+        sp = ttk.Spinbox(box, from_=1, to=64, textvariable=v_heat_sigma, width=6); sp.pack(side="left", padx=(6, 0))
+        _bind_help(sp, "heat_sigma", ex_help_lbl)
+        return box
+    _row(ex_heat, "", _heat_sigma_row)
+
+    ttk.Separator(ex_heat, orient="horizontal").pack(fill="x", padx=4, pady=6)
+
+    def _heat_window_row(fr):
+        box = ttk.Frame(fr)
+        cb = ttk.Checkbutton(box, text="Use rolling window (minutes)", variable=v_heat_window_enabled); cb.pack(side="left")
+        _bind_help(cb, "heat_window_enabled", ex_help_lbl)
+        ttk.Label(box, text="Length (min):").pack(side="left", padx=(12, 4))
+        ent = ttk.Entry(box, textvariable=v_heat_window_minutes, width=8); ent.pack(side="left")
+        _bind_help(ent, "heat_window_minutes", ex_help_lbl)
+        return box
+    _row(ex_heat, "", _heat_window_row)
+
+    def _heat_decay_row(fr):
+        box = ttk.Frame(fr)
+        ttk.Label(box, text="OR per-frame decay (0–1):").pack(side="left")
+        ent = ttk.Entry(box, textvariable=v_heat_decay, width=8); ent.pack(side="left", padx=(6, 0))
+        _bind_help(ent, "heat_decay", ex_help_lbl)
+        return box
+    _row(ex_heat, "", _heat_decay_row)
+
+    def _heat_save_row(fr):
+        box = ttk.Frame(fr)
+        ttk.Label(box, text="Save interval (s, 0=off):").pack(side="left")
+        ent = ttk.Entry(box, textvariable=v_heat_save_interval_s, width=8); ent.pack(side="left", padx=(6, 0))
+        _bind_help(ent, "heat_save_interval_s", ex_help_lbl)
+        return box
+    _row(ex_heat, "", _heat_save_row)
 
     # ────────────────── bottom action bar (outside tabs) ──────────────────
     def _collect() -> dict:
@@ -433,9 +538,20 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
             # Extras
             "hud_scale": max(0.5, min(2.0, _int(v_hud_scale, 100) / 100.0)),
             "snapshot_on_events": bool(v_snapshot_events.get()),
-            "_meta": {"version": 6, "saved_at": datetime.now().isoformat(timespec="seconds")},
+            # Heatmap (new)
+            "heat_enabled": bool(v_heat_enabled.get()),
+            "heat_overlay_on_start": bool(v_heat_overlay.get()),
+            "heat_use_aoi": bool(v_heat_use_aoi.get()),
+            "heat_alpha": float(v_heat_alpha.get()),
+            "heat_sigma": int(v_heat_sigma.get()),
+            "heat_window_enabled": bool(v_heat_window_enabled.get()),
+            "heat_window_minutes": float(v_heat_window_minutes.get()),
+            "heat_decay": float(v_heat_decay.get()),
+            "heat_save_interval_s": int(v_heat_save_interval_s.get()),
+            "_meta": {"version": 7, "saved_at": datetime.now().isoformat(timespec="seconds")},
         }
 
+    # bottom bar
     bar = ttk.Frame(root); bar.pack(side="bottom", fill="x", padx=8, pady=8)
 
     def _apply():
@@ -476,6 +592,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
                 if n in d: return d[n]
             return default
 
+        # main
         v_imgsz.set(str(_getk("imgsz", default=defaults["imgsz"])))
         v_conf.set(str(_getk("conf", default=defaults["conf"])))
         v_iou.set(str(_getk("iou", default=defaults["iou"])))
@@ -506,6 +623,17 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
 
         v_hud_scale.set(str(int(round(float(_getk("hud_scale", default=defaults["hud_scale"])) * 100))))
         v_snapshot_events.set(bool(_getk("snapshot_on_events", default=defaults["snapshot_on_events"])))
+
+        # heatmap
+        v_heat_enabled.set(bool(_getk("heat_enabled", default=defaults["heat_enabled"])))
+        v_heat_overlay.set(bool(_getk("heat_overlay_on_start", default=defaults["heat_overlay_on_start"])))
+        v_heat_use_aoi.set(bool(_getk("heat_use_aoi", default=defaults["heat_use_aoi"])))
+        v_heat_alpha.set(float(_getk("heat_alpha", default=defaults["heat_alpha"])))
+        v_heat_sigma.set(int(_getk("heat_sigma", default=defaults["heat_sigma"])))
+        v_heat_window_enabled.set(bool(_getk("heat_window_enabled", default=defaults["heat_window_enabled"])))
+        v_heat_window_minutes.set(float(_getk("heat_window_minutes", default=defaults["heat_window_minutes"])))
+        v_heat_decay.set(float(_getk("heat_decay", default=defaults["heat_decay"])))
+        v_heat_save_interval_s.set(int(_getk("heat_save_interval_s", default=defaults["heat_save_interval_s"])))
 
         app.adv_params.update(_collect())  # silent apply
 
