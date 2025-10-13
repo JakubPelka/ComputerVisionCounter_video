@@ -20,6 +20,10 @@ from cv_video_geom import (
 from cv_video_hud import draw_lines_zones, draw_trails, draw_counts_panel
 from cv_video_sound import SoundPlayer
 
+# NEW: global "Now / Max this run" counters (small, separate module)
+from cv_video_stats import StatsAggregator
+from cv_video_hud_extras import draw_run_counters
+
 try:
     import supervision as sv  # optional
 except Exception:
@@ -503,8 +507,12 @@ def run(app, sources, outp: Path, selected_idx):
                 editor = CounterEditor(app, frame_bgr=first_frame, default_cfg_path=default_cfg_path, live_cap=None)
                 result, aborted = editor.run_modal()
 
-            if aborted or not result:
+            # PATCH: allow "OK" with empty config (no AOI) -> continue run
+            if aborted:
                 app._log("[INFO] Counter configuration cancelled — aborting run.")
+                cap.release(); return
+            if result is None:
+                app._log("[INFO] No configuration payload — aborting run.")
                 cap.release(); return
 
             # unified run tag (used for snapshots, csv, json)
@@ -514,8 +522,8 @@ def run(app, sources, outp: Path, selected_idx):
             snap_enabled = bool(p.get("snapshot_on_events", False))
             snap_dir = ensure_dir(snap_root / f"{base_stem}_{run_tag}") if snap_enabled else None
 
-            lines_cfg = result.get("lines", [])
-            zones_cfg = result.get("zones", [])
+            lines_cfg = result.get("lines", []) or []
+            zones_cfg = result.get("zones", []) or []
             stride = max(1, int(frame_skip))
 
             writer, out_path = open_video_writer_collision(vids_dir / f"{base_stem}_annotated.mp4", W, H, fps)
@@ -535,6 +543,19 @@ def run(app, sources, outp: Path, selected_idx):
             trails = {} if (getattr(app, "trace_enabled", None).get() if hasattr(app, "trace_enabled") else True) else None
             ev_i_saved = 0
             app._alert_state = {"last_ms": 0, "looping": False}
+
+            # NEW: per-source global counters (Now / Max this run)
+            names_obj = getattr(app, "names", {})
+            if isinstance(names_obj, dict):
+                max_id = max(names_obj.keys()) if names_obj else -1
+                id2name = [""] * (max_id + 1)
+                for k, v in names_obj.items():
+                    id2name[int(k)] = str(v)
+            elif isinstance(names_obj, list):
+                id2name = [str(x) for x in names_obj]
+            else:
+                id2name = []
+            stats = StatsAggregator(id2name, selected_ids=selected_class_ids_set or None)
 
             def _frame_timing(is_stream_local: bool):
                 if is_stream_local:
@@ -598,6 +619,17 @@ def run(app, sources, outp: Path, selected_idx):
                                 trace_color=_parse_color(p.get("trace_color", None)),
                                 trace_thickness=int(p.get("trace_thickness", 2)) if str(p.get("trace_thickness","")).strip() != "" else 2)
 
+                # NEW: Global Now / Max this run (bottom-left), AOI optional
+                try:
+                    stats.update_from_cids(cids)
+                    now_counts = stats.now_named()
+                    max_counts = stats.max_named()
+                    if now_counts:
+                        draw_run_counters(ov, now_counts, max_counts, anchor="bl", app=app)
+                except Exception:
+                    pass
+
+                # Existing BR panel with lines/zones counters (unchanged)
                 draw_counts_panel(ov, lines_cfg, line_counts, zones_cfg, zone_counts, anchor="br", app=app)
 
                 # snapshots on new events

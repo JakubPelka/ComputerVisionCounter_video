@@ -9,3 +9,4 @@ models/yolo11x.pt
 /output
 /src/__pycache__
 /temp
+/reklam
