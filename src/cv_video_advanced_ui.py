@@ -1,9 +1,13 @@
-# cv_video_advanced_ui.py — Advanced settings UI (numeric Heatmap controls + fixed help wrap + bottom bar)
+# cv_video_advanced_ui.py — Advanced settings UI
+# - Syncs from main Quality slider (robust)
+# - Overlay picker removed (set in Main window)
+# - Numeric heatmap controls + presets bar + wrapped help
 from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 import json
+import re
 from datetime import datetime
 
 try:
@@ -65,9 +69,7 @@ def _make_scrollable(parent: tk.Misc) -> ttk.Frame:
     win_id = canvas.create_window((0, 0), window=interior, anchor="nw")
 
     def _on_config(_=None):
-        # make canvas scroll to fit content
         canvas.configure(scrollregion=canvas.bbox("all"))
-        # ensure interior width follows canvas width
         canvas.itemconfigure(win_id, width=canvas.winfo_width())
 
     interior.bind("<Configure>", _on_config)
@@ -88,16 +90,89 @@ def _make_help_panel(parent: tk.Misc, title="Help", width=HELP_WIDTH):
     lbl = tk.Label(fr, text="Focus a field to see help.", justify="left", anchor="nw")
     lbl.pack(fill="both", expand=True, padx=8, pady=8)
 
-    # 🔧 ensure wrapping always fits inside the visible help frame
+    # Wrap inside the visible panel width
     def _rewrap(_=None):
-        # minus padding to avoid clipping
-        w = max(60, fr.winfo_width() - 16)
-        lbl.config(wraplength=w)
+        lbl.config(wraplength=max(60, fr.winfo_width() - 16))
     fr.bind("<Configure>", _rewrap)
     lbl.bind("<Configure>", _rewrap)
     _rewrap()
 
     return fr, lbl
+
+# ── Quality sync helpers ─────────────────────────────────────────────
+_Q_RE = re.compile(r'(\w+)\s*=\s*([0-9]*\.?[0-9]+)')
+
+def _parse_quality_string(s: str) -> dict:
+    """Parse strings like 'imgsz=960 conf=0.6 iou=0.5 skip=1 buf=60 match=0.78 hits=2'."""
+    if not isinstance(s, str) or ("imgsz=" not in s and "conf=" not in s):
+        return {}
+    out = {}
+    for k, v in _Q_RE.findall(s):
+        try:
+            num = float(v)
+            if k in ("imgsz", "skip", "buf", "hits"):
+                num = int(round(num))
+            out[k] = num
+        except Exception:
+            continue
+    # normalize synonyms
+    if "skip" in out:  out["frame_skip"]    = int(out.pop("skip"))
+    if "buf" in out:   out["track_buffer"]  = int(out.pop("buf"))
+    if "match" in out: out["match_thresh"]  = float(out.pop("match"))
+    if "hits" in out:  out["min_hits"]      = int(out.pop("hits"))
+    return out
+
+def _extract_quality_from_main(app) -> dict:
+    """
+    Try several ways to read the current Quality preset from the main window.
+    Priority:
+      1) app.get_quality_params()
+      2) app.quality_presets + app.v_quality / app.quality_value
+      3) app.quality_params (dict)
+      4) Parse any tk.StringVar or tk.Label on app that contains 'imgsz=... conf=...'
+    Returns normalized keys: imgsz, conf, iou, frame_skip, track_buffer, match_thresh, min_hits
+    """
+    # 1) direct method
+    if hasattr(app, "get_quality_params") and callable(getattr(app, "get_quality_params")):
+        try:
+            d = dict(app.get_quality_params() or {})
+            return _parse_quality_string(" ".join(f"{k}={v}" for k, v in d.items())) or d
+        except Exception:
+            pass
+
+    # 2) presets + selection
+    presets = getattr(app, "quality_presets", None)
+    if isinstance(presets, dict) and presets:
+        sel = None
+        if hasattr(app, "v_quality"):
+            try: sel = int(app.v_quality.get())
+            except Exception: sel = None
+        if sel is None and hasattr(app, "quality_value"):
+            sel = getattr(app, "quality_value", None)
+        if sel in presets:
+            d = dict(presets[sel] or {})
+            return _parse_quality_string(" ".join(f"{k}={v}" for k, v in d.items())) or d
+
+    # 3) single dict
+    qd = getattr(app, "quality_params", None)
+    if isinstance(qd, dict) and qd:
+        d = dict(qd)
+        return _parse_quality_string(" ".join(f"{k}={v}" for k, v in d.items())) or d
+
+    # 4) parse any stringvar/label on app with 'imgsz=' form
+    #    (covers UIs that only show a readout text)
+    for val in app.__dict__.values():
+        try:
+            if isinstance(val, tk.StringVar):
+                parsed = _parse_quality_string(val.get())
+                if parsed: return parsed
+            elif isinstance(val, (tk.Label, ttk.Label)):
+                parsed = _parse_quality_string(val.cget("text"))
+                if parsed: return parsed
+        except Exception:
+            continue
+
+    return {}
 
 HELP = {
     # Core
@@ -113,7 +188,6 @@ HELP = {
     "zone_min_gap": "Anti-flicker gap for zone in/out (frames).",
 
     "live_preview": "Show processed video during the run.",
-    "overlay_mode": "centroid = dots; box = rectangles; box+conf = boxes + score.",
     "trace_enabled": "Draw a trail for each track.",
     "trace_len": "Trail length (points).",
     "anchor_mode": "Counting point of the box: center or bottom.",
@@ -133,9 +207,9 @@ HELP = {
     "hud_scale": "HUD size (%). 100 = default.",
     "snapshot_on_events": "Save a snapshot on every line/zone event.",
 
-    # Heatmap (numeric)
+    # Heatmap
     "heat_enabled": "Create a heatmap by accumulating detections (On/Off).",
-    "heat_overlay_on_start": "Show heatmap overlay in preview   .",
+    "heat_overlay_on_start": "Show heatmap overlay in preview (toggle 'm' during run).",
     "heat_use_aoi": "Restrict accumulation to your drawn zones (AOI).",
     "heat_alpha": "Overlay opacity (0–1). 0 = invisible, 1 = only heatmap. Typical: 0.6–0.9.",
     "heat_gamma": "Overlay contrast (0.5–2.0). Higher = hotspots pop. Typical: 1.2–1.6.",
@@ -165,7 +239,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     except Exception:
         style = None
 
-    # defaults
+    # Base defaults from current adv params (existing behavior)
     defaults = {
         # main
         "imgsz": p.get("imgsz", 320), "conf": p.get("conf", 0.5), "iou": p.get("iou", 0.6),
@@ -176,7 +250,6 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
 
         "live_preview": p.get("live_preview", True),
         "trace_enabled": p.get("trace_enabled", True), "trace_len": p.get("trace_len", 24),
-        "overlay_mode": p.get("overlay_mode", "centroid"),
         "anchor_mode": p.get("anchor_mode", "center"), "ghost_margin": p.get("ghost_margin", 24),
         "trace_color": p.get("trace_color", "auto"), "trace_thickness": p.get("trace_thickness", 2),
         "overlay_frame_color": p.get("overlay_frame_color", "auto"),
@@ -193,17 +266,23 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         "heat_enabled": p.get("heat_enabled", False),
         "heat_overlay_on_start": p.get("heat_overlay_on_start", False),
         "heat_use_aoi": p.get("heat_use_aoi", False),
-        "heat_alpha": p.get("heat_alpha", 0.6),
+        "heat_alpha": p.get("heat_alpha", 0.8),
         "heat_gamma": p.get("heat_gamma", 1.2),
         "heat_zero_thresh": p.get("heat_zero_thresh", 0.001),
-        "heat_sigma": p.get("heat_sigma", 8),
+        "heat_sigma": p.get("heat_sigma", 32),
         "heat_window_enabled": p.get("heat_window_enabled", False),
         "heat_window_minutes": p.get("heat_window_minutes", 30.0),
-        "heat_decay": p.get("heat_decay", 0.02),
+        "heat_decay": p.get("heat_decay", 0.0002),
         "heat_save_interval_s": p.get("heat_save_interval_s", 0),
         "heat_gain": p.get("heat_gain", 1.5),
         "heat_memory_mult": p.get("heat_memory_mult", 2.0),
     }
+
+    # ⤴ Merge current Quality preset from Main (robust scan)
+    q = _extract_quality_from_main(app)
+    for k, v in q.items():
+        if k in defaults and v is not None:
+            defaults[k] = v
 
     # tk variables
     def _ensure(name, cls, value):
@@ -223,9 +302,8 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     v_line_sep     = _ensure("v_line_sep", tk.StringVar, str(defaults["line_min_sep"]))
     v_zone_gap     = _ensure("v_zone_gap", tk.StringVar, str(defaults["zone_min_gap"]))
 
-    # Overlay / trace / anchor
+    # Overlay / trace / anchor (no overlay picker here)
     v_live_preview = _ensure("preview_enabled", tk.BooleanVar, bool(defaults["live_preview"]))
-    app.overlay_mode = _ensure("overlay_mode", tk.StringVar, str(defaults["overlay_mode"]))
     app.anchor_mode  = _ensure("anchor_mode",  tk.StringVar, str(defaults["anchor_mode"]))
     app.ghost_margin = _ensure("ghost_margin", tk.StringVar, str(defaults["ghost_margin"]))
     app.trace_enabled= _ensure("trace_enabled", tk.BooleanVar, bool(defaults["trace_enabled"]))
@@ -247,8 +325,8 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     v_hud_scale       = _ensure("v_hud_scale", tk.StringVar, str(int(round(float(defaults["hud_scale"]) * 100))))
     v_snapshot_events = _ensure("snapshot_on_events", tk.BooleanVar, bool(defaults["snapshot_on_events"]))
 
-    # Heatmap (numeric)
-    v_heat_enabled          = tk.IntVar(value=1 if defaults["heat_enabled"] else 0)  # radio 0/1
+    # Heatmap
+    v_heat_enabled          = tk.IntVar(value=1 if defaults["heat_enabled"] else 0)
     v_heat_overlay          = tk.BooleanVar(value=bool(defaults["heat_overlay_on_start"]))
     v_heat_use_aoi          = tk.BooleanVar(value=bool(defaults["heat_use_aoi"]))
     v_heat_alpha            = tk.DoubleVar(value=float(defaults["heat_alpha"]))
@@ -263,10 +341,8 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     v_heat_memory_mult      = tk.DoubleVar(value=float(defaults["heat_memory_mult"]))
 
     # ───────────── layout ─────────────
-    root = ttk.Frame(parent)
-    root.pack(fill="both", expand=True)
+    root = ttk.Frame(parent); root.pack(fill="both", expand=True)
 
-    # Notebook (main area)
     nb = ttk.Notebook(root, style=("Adv.TNotebook" if style else "TNotebook"))
     nb.pack(side="top", fill="both", expand=True)
 
@@ -274,8 +350,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     main_tab = ttk.Frame(nb); nb.add(main_tab, text="Main")
     main = _make_scrollable(main_tab)
     left = ttk.Frame(main); left.pack(side="left", fill="both", expand=True)
-    right, help_lbl = _make_help_panel(main, title="Help", width=HELP_WIDTH)
-    right.pack(side="left", fill="y", padx=(8,0))
+    right, help_lbl = _make_help_panel(main, title="Help", width=HELP_WIDTH); right.pack(side="left", fill="y", padx=(8,0))
 
     lf = ttk.LabelFrame(left, text="Detection / Tracking / Hysteresis")
     lf.pack(fill="x", padx=6, pady=(6,4))
@@ -287,18 +362,10 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         _, e = _row(lf, key, lambda fr, v=var: ttk.Entry(fr, textvariable=v, width=10))
         _bind_help(e, key.split("_frames")[0].split("_px")[0], help_lbl)
 
-    lf = ttk.LabelFrame(left, text="Overlay / Trace / Anchor / Ghost")
+    lf = ttk.LabelFrame(left, text="Trace / Anchor / Ghost")
     lf.pack(fill="x", padx=6, pady=(4,4))
     _, cb = _row(lf, "", lambda fr: ttk.Checkbutton(fr, text="Enable LIVE preview", variable=v_live_preview))
     _bind_help(cb, "live_preview", help_lbl)
-
-    def _overlay_row(fr):
-        box = ttk.Frame(fr)
-        ttk.Label(box, text="Overlay:").pack(side="left")
-        cmb = ttk.Combobox(box, textvariable=app.overlay_mode, state="readonly", width=12, values=["centroid", "box", "box+conf"])
-        cmb.pack(side="left", padx=(6,0)); _bind_help(cmb, "overlay_mode", help_lbl)
-        return box
-    _row(lf, "", _overlay_row)
 
     def _trace_row(fr):
         box = ttk.Frame(fr)
@@ -318,7 +385,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         return box
     _row(lf, "", _anchor_row)
 
-    lf = ttk.LabelFrame(left, text="Colors/Thickness")
+    lf = ttk.LabelFrame(left, text="Colors / Thickness")
     lf.pack(fill="x", padx=6, pady=(4,6))
     for key, var, width in (("Trace color (auto/#RRGGBB/B,G,R)", v_trace_color, 14),
                             ("Trace thickness (px)", v_trace_thick, 6),
@@ -373,7 +440,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     _, cb = _row(ex_snap, "", lambda fr: ttk.Checkbutton(fr, text="Save snapshot on events", variable=v_snapshot_events))
     _bind_help(cb, "snapshot_on_events", ex_help)
 
-    # Heatmap (all numeric fields)
+    # Heatmap
     ex_heat = ttk.LabelFrame(ex_left, text="Heatmap"); ex_heat.pack(fill="x", padx=6, pady=(4,6))
 
     def _onoff(fr):
@@ -387,7 +454,6 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
 
     _, cb = _row(ex_heat, "", lambda fr: ttk.Checkbutton(fr, text="Show overlay in preview", variable=v_heat_overlay))
     _bind_help(cb, "heat_overlay_on_start", ex_help)
-
     _, cb = _row(ex_heat, "", lambda fr: ttk.Checkbutton(fr, text="Restrict to zones (AOI mask)", variable=v_heat_use_aoi))
     _bind_help(cb, "heat_use_aoi", ex_help)
 
@@ -400,27 +466,21 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
     _row(ex_heat, "Contrast gamma (0.5–2.0)",   lambda fr: _num(fr, v_heat_gamma, "heat_gamma"))
     _row(ex_heat, "No-data threshold",          lambda fr: _num(fr, v_heat_zero_thresh, "heat_zero_thresh"))
 
-    # sigma spinbox (bind help to widget, not variable)
     def _sigma_row(fr):
         sp = ttk.Spinbox(fr, from_=1, to=64, textvariable=v_heat_sigma, width=6)
         _bind_help(sp, "heat_sigma", ex_help)
         return sp
     _row(ex_heat, "Sigma (px)", _sigma_row)
     _row(ex_heat, "Accumulation gain",          lambda fr: _num(fr, v_heat_gain, "heat_gain"))
-
     _row(ex_heat, "Save interval (s, 0=off)",   lambda fr: _num(fr, v_heat_save_interval_s, "heat_save_interval_s"))
-    _row(ex_heat, "Per-frame decay (0–1)",   lambda fr: _num(fr, v_heat_decay, "heat_decay"))
+    _row(ex_heat, "Per-frame decay (0–1)",      lambda fr: _num(fr, v_heat_decay, "heat_decay"))
     _row(ex_heat, "", lambda fr: ttk.Checkbutton(fr, text="Use rolling window", variable=v_heat_window_enabled))
-    _row(ex_heat, "OR Rolling window (min)",       lambda fr: _num(fr, v_heat_window_minutes, "heat_window_minutes"))
+    _row(ex_heat, "OR Rolling window (min)",    lambda fr: _num(fr, v_heat_window_minutes, "heat_window_minutes"))
     _row(ex_heat, "Memory× (window only)",      lambda fr: _num(fr, v_heat_memory_mult, "heat_memory_mult"))
+    _bind_help(ex_heat, "heat_window_enabled", ex_help)
 
-
-
-    _bind_help(ex_heat, "heat_window_enabled", ex_help)  # focus in the group shows note
-
-    # ───────────── bottom bar (keep visible) ─────────────
-    bar = ttk.Frame(root)
-    bar.pack(side="bottom", fill="x", padx=8, pady=8)
+    # ───────────── bottom bar ─────────────
+    bar = ttk.Frame(root); bar.pack(side="bottom", fill="x", padx=8, pady=8)
 
     def _collect() -> dict:
         return {
@@ -436,7 +496,6 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
             "line_min_sep": _int(v_line_sep, defaults["line_min_sep"]),
             "zone_min_gap": _int(v_zone_gap, defaults["zone_min_gap"]),
 
-            "overlay_mode": str(app.overlay_mode.get()),
             "anchor_mode": _str(app.anchor_mode, defaults["anchor_mode"]),
             "ghost_margin": _int(app.ghost_margin, defaults["ghost_margin"]),
             "trace_enabled": bool(app.trace_enabled.get()),
@@ -455,6 +514,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
 
             "hud_scale": max(0.5, min(2.0, _int(v_hud_scale, 100)/100.0)),
             "snapshot_on_events": bool(v_snapshot_events.get()),
+            "live_preview": bool(v_live_preview.get()),
 
             # heatmap
             "heat_enabled": bool(int(v_heat_enabled.get()) == 1),
@@ -470,10 +530,11 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
             "heat_save_interval_s": _int(v_heat_save_interval_s, defaults["heat_save_interval_s"]),
             "heat_gain": _float(v_heat_gain, defaults["heat_gain"]),
             "heat_memory_mult": _float(v_heat_memory_mult, defaults["heat_memory_mult"]),
-            "_meta": {"version": 11, "saved_at": datetime.now().isoformat(timespec="seconds")},
+            "_meta": {"version": 13, "saved_at": datetime.now().isoformat(timespec="seconds")},
         }
 
     ttk.Button(bar, text="Apply", command=lambda: app.adv_params.update(_collect())).pack(side="left")
+
     def _save_preset():
         data = _collect()
         path = filedialog.asksaveasfilename(
@@ -514,7 +575,6 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         v_line_sep.set(str(G("line_min_sep", defaults["line_min_sep"])))
         v_zone_gap.set(str(G("zone_min_gap", defaults["zone_min_gap"])))
 
-        app.overlay_mode.set(str(G("overlay_mode", defaults["overlay_mode"])))
         app.anchor_mode.set(str(G("anchor_mode", defaults["anchor_mode"])))
         app.ghost_margin.set(str(G("ghost_margin", defaults["ghost_margin"])))
         app.trace_enabled.set(bool(G("trace_enabled", defaults["trace_enabled"])))
@@ -532,6 +592,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
 
         v_hud_scale.set(str(int(round(float(G("hud_scale", defaults["hud_scale"])) * 100))))
         v_snapshot_events.set(bool(G("snapshot_on_events", defaults["snapshot_on_events"])))
+        v_live_preview.set(bool(G("live_preview", defaults["live_preview"])))
 
         # heat
         v_heat_enabled.set(1 if G("heat_enabled", defaults["heat_enabled"]) else 0)
@@ -548,7 +609,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         v_heat_gain.set(float(G("heat_gain", defaults["heat_gain"])))
         v_heat_memory_mult.set(float(G("heat_memory_mult", defaults["heat_memory_mult"])))
 
-        # apply loaded immediately so Help reflects values
+        # apply immediately
         app.adv_params.update(_collect())
 
     ttk.Button(bar, text="Save preset…", command=_save_preset).pack(side="left", padx=(8,0))
