@@ -501,6 +501,8 @@ def _update_counts_and_alerts(
                         "event_type": f"line_{direction}",
                         "counter_name": ln.get("name", f"line_{li}"),
                         "conf": float(s),
+                        "AB": 1 if direction == "ab" else 0,
+                        "BA": 1 if direction == "ba" else 0,
                     }
                 )
                 # Trigger sound only when in line mode
@@ -535,6 +537,8 @@ def _update_counts_and_alerts(
                             "event_type": ev,
                             "counter_name": zn.get("name", f"zone_{zi}"),
                             "conf": float(s),
+                            "AB": 0,
+                            "BA": 0,
                         }
                     )
             else:
