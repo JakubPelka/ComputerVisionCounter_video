@@ -943,38 +943,26 @@ def run(app, sources, outp: Path, selected_idx):
                 _writer_write_safe(writer, _ensure_bgr(ov), frame, (W, H), app)
                 _preview(app, ov, processed, fps, total_frames)
 
-                # periodic heatmap save to /heatmap + output root
+                # periodic heatmap save to /heatmap ONLY
                 if heat_enabled and heat_save_interval_s > 0:
                     if (last_heat_save_sec < 0.0) or (cur_time_sec - last_heat_save_sec >= heat_save_interval_s):
                         last_heat_save_sec = cur_time_sec
                         try:
-                            hm_path = heat_dir / f"{base_stem}_{run_tag}_{int(cur_time_sec):06d}s_heatmap.png"
-                            hm_ov_path = heat_dir / f"{base_stem}_{run_tag}_{int(cur_time_sec):06d}s_heat_overlay.png"
+                            hm_path      = heat_dir / f"{base_stem}_{run_tag}_{int(cur_time_sec):06d}s_heatmap.png"
                             hm_rgba_path = heat_dir / f"{base_stem}_{run_tag}_{int(cur_time_sec):06d}s_heatmap_rgba.png"
+                            hm_ov_path   = heat_dir / f"{base_stem}_{run_tag}_{int(cur_time_sec):06d}s_heat_overlay.png"
+
+                            # opaque heatmap (compat) + transparent zeros version
                             heatmap.save_png(hm_path, normalize=True)
-                            # transparent zeros
-                            heatmap.save_png_rgba(
-                                hm_rgba_path, alpha_scale=1.0, gamma=heat_gamma, thresh=heat_zero_thresh
-                            )
+                            heatmap.save_png_rgba(hm_rgba_path, alpha_scale=1.0, gamma=heat_gamma, thresh=heat_zero_thresh)
+
+                            # overlay preview snapshot (optional)
                             if isinstance(ov, np.ndarray):
                                 hm_ov = heatmap.render_overlay_masked(
                                     ov, alpha=heat_alpha, gamma=heat_gamma, thresh=heat_zero_thresh
                                 )
                                 cv2.imwrite(str(hm_ov_path), hm_ov)
-                            # “latest” copies to output root:
-                            cv2.imwrite(str((outp / f"{base_stem}_heatmap_latest.png")), cv2.imread(str(hm_path)))
-                            try:
-                                cv2.imwrite(
-                                    str((outp / f"{base_stem}_heatmap_latest_rgba.png")),
-                                    cv2.imread(str(hm_rgba_path), cv2.IMREAD_UNCHANGED),
-                                )
-                            except Exception:
-                                pass
-                            if "hm_ov" in locals():
-                                cv2.imwrite(
-                                    str((outp / f"{base_stem}_heatmap_overlay_latest.png")),
-                                    hm_ov,
-                                )
+
                             app._log(f"[HEAT] periodic save @ {cur_time_sec:.1f}s → {hm_path.name}")
                         except Exception as e:
                             app._log(f"[WARN] periodic heatmap save failed: {e}")
@@ -1078,30 +1066,25 @@ def run(app, sources, outp: Path, selected_idx):
             sum_csv_path = save_csv_collision(sum_csv_df, summ_dir / f"{base_stem}_{run_tag}_summary.csv")
             app._log(f"Saved summary CSV: {sum_csv_path}")
 
-            # final heatmap save (both places)
-            try:
-                hm_path = heat_dir / f"{base_stem}_{run_tag}_heatmap.png"
-                hm_ov_path = heat_dir / f"{base_stem}_{run_tag}_heatmap_overlay.png"
-                hm_rgba_path = heat_dir / f"{base_stem}_{run_tag}_heatmap_rgba.png"
-                heatmap.save_png(hm_path, normalize=True)
-                heatmap.save_png_rgba(hm_rgba_path, alpha_scale=1.0, gamma=heat_gamma, thresh=heat_zero_thresh)
-                if "ov" in locals() and isinstance(ov, np.ndarray):
-                    hm_ov = heatmap.render_overlay_masked(ov, alpha=heat_alpha, gamma=heat_gamma, thresh=heat_zero_thresh)
-                    cv2.imwrite(str(hm_ov_path), hm_ov)
-                # “latest” copies to output root:
-                cv2.imwrite(str((outp / f"{base_stem}_heatmap_latest.png")), cv2.imread(str(hm_path)))
+            # final heatmap save (ONLY when enabled and ONLY to /heatmap)
+            if heat_enabled:
                 try:
-                    cv2.imwrite(
-                        str((outp / f"{base_stem}_heatmap_latest_rgba.png")),
-                        cv2.imread(str(hm_rgba_path), cv2.IMREAD_UNCHANGED),
-                    )
-                except Exception:
-                    pass
-                if "hm_ov" in locals():
-                    cv2.imwrite(str((outp / f"{base_stem}_heatmap_overlay_latest.png")), hm_ov)
-                app._log(f"Saved heatmap: {hm_path.name} (+ latest copies in output root)")
-            except Exception as e:
-                app._log(f"[WARN] Heatmap save failed: {e}")
+                    hm_path      = heat_dir / f"{base_stem}_{run_tag}_heatmap.png"
+                    hm_rgba_path = heat_dir / f"{base_stem}_{run_tag}_heatmap_rgba.png"
+                    hm_ov_path   = heat_dir / f"{base_stem}_{run_tag}_heatmap_overlay.png"
+
+                    heatmap.save_png(hm_path, normalize=True)
+                    heatmap.save_png_rgba(hm_rgba_path, alpha_scale=1.0, gamma=heat_gamma, thresh=heat_zero_thresh)
+
+                    if "ov" in locals() and isinstance(ov, np.ndarray):
+                        hm_ov = heatmap.render_overlay_masked(
+                            ov, alpha=heat_alpha, gamma=heat_gamma, thresh=heat_zero_thresh
+                        )
+                        cv2.imwrite(str(hm_ov_path), hm_ov)
+
+                    app._log(f"Saved heatmap: {hm_path.name}")
+                except Exception as e:
+                    app._log(f"[WARN] Heatmap save failed: {e}")
 
         app._set_progress(100.0, "Done.")
 
