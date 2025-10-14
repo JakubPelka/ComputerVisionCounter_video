@@ -405,7 +405,7 @@ def _track_update(tracker, boxes, scores, cids):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# counting + alerts
+# counting + alerts (NOW WITH ALERT MODE)
 # ──────────────────────────────────────────────────────────────────────────────
 def _update_counts_and_alerts(
     app,
@@ -434,15 +434,27 @@ def _update_counts_and_alerts(
     selected_class_ids_set,
     alert_freeze_ms,
     alert_when_inside,
+    alert_mode,                           # NEW: 1=inside, 0=outside, 2=line
     sound_player: SoundPlayer | None,
     alert_loop: bool,
 ):
+    """
+    Updates line/zone counters and triggers sound according to alert_mode:
+      - 1 = inside zone (uses loop/single according to alert_loop)
+      - 0 = outside zone (uses loop/single according to alert_loop)
+      - 2 = line crossing (always single ping with cooldown)
+    """
     anchors = [_anchor_from_box(b, anchor_mode, ghost_margin) for b in det_boxes]
     now_ms = int(time.time() * 1000)
-    frame_active_ids = set()
+    frame_active_ids = set()   # any ID that should fire sound THIS frame
 
     for (tid, b, s, cid, (cx, cy)) in zip(det_ids, det_boxes, det_confs, det_cids, anchors):
-        # lines
+        # class filter
+        if selected_class_ids_set and int(cid) not in selected_class_ids_set:
+            last_anchor[tid] = (cx, cy)
+            continue
+
+        # ───────── Lines
         for li, ln in enumerate(lines_cfg or []):
             st = line_states[li].get(tid, {"last_side": None, "last_frame": -9999})
             prev_c = last_anchor.get(tid, (cx, cy))
@@ -485,16 +497,19 @@ def _update_counts_and_alerts(
                         "clock": clock_str,
                         "track_id": int(tid),
                         "class_id": int(cid),
-                        "class_name": (names[cid] if isinstance(names, dict) else names[cid]),
+                        "class_name": (names[cid] if isinstance(names, dict) else names[cid]) if names else str(cid),
                         "event_type": f"line_{direction}",
-                        "counter_name": ln["name"],
+                        "counter_name": ln.get("name", f"line_{li}"),
                         "conf": float(s),
                     }
                 )
+                # Trigger sound only when in line mode
+                if int(alert_mode) == 2:
+                    frame_active_ids.add(tid)
             else:
                 line_states[li][tid] = st
 
-        # zones
+        # ───────── Zones
         for zi, zn in enumerate(zones_cfg or []):
             sstate = zone_states[zi].get(tid, {"inside": False, "last_change": -9999})
             inside_now = point_in_polygon((cx, cy), zn["pts"])
@@ -516,53 +531,52 @@ def _update_counts_and_alerts(
                             "clock": clock_str,
                             "track_id": int(tid),
                             "class_id": int(cid),
-                            "class_name": (names[cid] if isinstance(names, dict) else names[cid]),
+                            "class_name": (names[cid] if isinstance(names, dict) else names[cid]) if names else str(cid),
                             "event_type": ev,
-                            "counter_name": zn["name"],
+                            "counter_name": zn.get("name", f"zone_{zi}"),
                             "conf": float(s),
                         }
                     )
             else:
                 zone_states[zi][tid] = sstate
 
-            # alert condition tracking set
-            if app.alert_enabled.get() if hasattr(app, "alert_enabled") else alert_enabled:
-                want_inside = bool(alert_when_inside)
+            # Sound trigger from zones only when alert_mode != line
+            if alert_enabled and int(alert_mode) != 2:
+                want_inside = (int(alert_when_inside) == 1)
                 cond = (sstate.get("inside", False) is True) if want_inside else (sstate.get("inside", False) is False)
                 if cond:
                     frame_active_ids.add(tid)
 
         last_anchor[tid] = (cx, cy)
 
-    # sound handling
+    # ───────── Sound dispatch
     if alert_enabled and sound_player:
-        if alert_loop:
+        loop_enabled = bool(alert_loop) and (int(alert_mode) != 2)
+        freeze_ms = int(alert_freeze_ms)
+
+        if loop_enabled:
+            # Loop while "active"
             if frame_active_ids:
                 if not app._alert_state.get("looping", False):
-                    if now_ms - app._alert_state.get("last_ms", 0) >= int(alert_freeze_ms):
+                    if now_ms - app._alert_state.get("last_ms", 0) >= freeze_ms:
                         sound_player.start_loop()
                         app._alert_state["last_ms"] = now_ms
                         app._alert_state["looping"] = True
-                        try:
-                            app._log("[ALERT] loop start")
-                        except Exception:
-                            pass
+                        try: app._log("[ALERT] loop start")
+                        except Exception: pass
             else:
                 if app._alert_state.get("looping", False):
                     sound_player.stop()
                     app._alert_state["looping"] = False
-                    try:
-                        app._log("[ALERT] loop stop")
-                    except Exception:
-                        pass
+                    try: app._log("[ALERT] loop stop")
+                    except Exception: pass
         else:
-            if frame_active_ids and now_ms - app._alert_state.get("last_ms", 0) >= int(alert_freeze_ms):
+            # Single ping with cooldown (used also for line mode)
+            if frame_active_ids and now_ms - app._alert_state.get("last_ms", 0) >= freeze_ms:
                 sound_player.play_once()
                 app._alert_state["last_ms"] = now_ms
-                try:
-                    app._log("[ALERT] ping")
-                except Exception:
-                    pass
+                try: app._log("[ALERT] ping")
+                except Exception: pass
 
     return anchors
 
@@ -610,7 +624,6 @@ def run(app, sources, outp: Path, selected_idx):
         try:
             hud_scale = float(p.get("hud_scale", 1.0))
             from cv_video_hud import HUD_SCALE_FACTOR
-
             HUD_SCALE_FACTOR[0] = hud_scale
         except Exception:
             pass
@@ -641,6 +654,8 @@ def run(app, sources, outp: Path, selected_idx):
         else:
             alert_freeze_ms = 1000 * int(p.get("alert_freeze_s", 2))
         alert_when_inside = int(p.get("alert_zone_inside", 1))
+        # NEW: derive mode (1=inside, 0=outside, 2=line). Back-compat: fall back to zone_inside.
+        alert_mode = int(p.get("alert_mode", 1 if p.get("alert_zone_inside", 1) else 0))
 
         sound_player = SoundPlayer(alert_sound_path if alert_sound_path else None)
 
@@ -828,6 +843,7 @@ def run(app, sources, outp: Path, selected_idx):
                     selected_class_ids_set,
                     alert_freeze_ms,
                     alert_when_inside,
+                    alert_mode,              # NEW
                     sound_player,
                     alert_loop,
                 )
@@ -999,6 +1015,7 @@ def run(app, sources, outp: Path, selected_idx):
                     "overlay_frame_color": p.get("overlay_frame_color", None),
                     "overlay_frame_thickness": int(p.get("overlay_frame_thickness", 2)),
                     "alert_zone_inside": int(p.get("alert_zone_inside", 1)),
+                    "alert_mode": int(alert_mode),                     # NEW
                     "alert_sound": alert_sound_path,
                     "alert_loop": alert_loop,
                     "alert_freeze_s": int(alert_freeze_ms / 1000),
