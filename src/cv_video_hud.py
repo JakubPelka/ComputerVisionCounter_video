@@ -74,69 +74,132 @@ def draw_trails(frame, trails, trace_color=None, trace_thickness=2):
         cv2.polylines(frame, [pts], False, col, th, cv2.LINE_AA)
 
 # ---- HUD / results panel -----------------------------------------------------
-def draw_counts_panel(frame,
-                      lines_cfg, line_counts,
-                      zones_cfg, zone_counts,
-                      anchor: str = "br",
-                      margin: int = 12,
-                      scale: float | None = None,
-                      app=None):
+def draw_counts_panel(frame, lines_cfg, line_counts, zones_cfg, zone_counts, anchor="br", app=None):
     """
-    Compact results panel in the chosen corner (default: bottom-right) on black background.
-    Auto-scales with frame height and Extras->HUD size (%).
+    Right-side HUD: per-line AB/BA and per-zone IN/OUT with per-class breakdowns,
+    plus a global SUM across zones (per-class).
+    Example:
+        Lines
+        Main: AB 12, BA 9
 
-    Args:
-        anchor: "tl"|"tr"|"bl"|"br"
-        margin: base margin (will also be scaled)
-        scale:  if given, additional multiplier (e.g. 1.25). If None, read from app.adv_params['hud_scale'].
-        app:    optional App to read adv_params['hud_scale'].
+        Zones
+        Zone1: IN (5): person 3, car 2; OUT (2): person 1, car 1
+        Zone2: IN (2): car 2; OUT (2): person 2
+
+        SUM (zones)
+        IN:  person 5, car 4
+        OUT: person 3, car 1
     """
-    # Build lines of text
-    rows: list[str] = []
-    for i, ln in enumerate(lines_cfg or []):
-        ab = int(line_counts[i].get("ab", 0))
-        ba = int(line_counts[i].get("ba", 0))
-        hint = ""
-        try:
-            hint = ab_dir_hint_for_line(ln)
-        except Exception:
-            pass
-        rows.append(f"{ln['name']}:  A->B {ab}  |  B->A {ba}" + (f"  ({hint})" if hint else ""))
-    for i, zn in enumerate(zones_cfg or []):
-        zin = int(zone_counts[i].get("in", 0)); zout = int(zone_counts[i].get("out", 0))
-        rows.append(f"{zn['name']}:  IN {zin}  |  OUT {zout}")
-
-    if not rows:
+    if frame is None:
         return
 
     H, W = frame.shape[:2]
 
-    # auto scale from resolution + user multiplier from Extras tab
+    # === unified scaling (same math everywhere) ===
     auto = max(0.6, min(2.2, H / 720.0))
     user = 1.0
-    if scale is not None:
-        user = float(scale)
-    elif app is not None:
+    if app is not None:
         try:
             user = float(getattr(app, "adv_params", {}).get("hud_scale", 1.0))
         except Exception:
             user = 1.0
-    s = auto * user  # final scale
+    s = auto * user
 
     font = cv2.FONT_HERSHEY_SIMPLEX
     txt_scale = 0.6 * s
     th = max(1, int(2 * s))
     pad = int(8 * s)
     gap = int(6 * s)
-    mar = int(margin * s)
+    mar = int(12 * s)
+    sec_gap = int(10 * s)  # extra gap after section headers
 
-    # measure
+    def _fmt_counts(dct):
+        if not isinstance(dct, dict) or not dct:
+            return ""
+        keys = sorted(dct.keys())
+        return ", ".join(f"{k} {int(dct[k])}" for k in keys)
+
+    rows = []
+
+    # ─── Lines
+    if lines_cfg and line_counts:
+        rows.append("Lines")
+        for i, ln in enumerate(lines_cfg):
+            name = ln.get("name", f"line_{i}")
+            lc = line_counts[i] if i < len(line_counts) else {"ab": 0, "ba": 0}
+            rows.append(f"{name}: AB {int(lc.get('ab', 0))}, BA {int(lc.get('ba', 0))}")
+        rows.append("")  # spacer
+
+    # ─── Zones with per-class breakdown
+    have_zones = bool(zones_cfg and zone_counts)
+    rows.append("Zones") if have_zones else None
+
+    # per-zone class buckets prepared by run.py
+    bz = getattr(app, "_zone_class_totals_by_zone", None)
+    for i, zn in enumerate(zones_cfg or []):
+        name = zn.get("name", f"zone_{i}")
+        zc = zone_counts[i] if i < len(zone_counts) else {"in": 0, "out": 0}
+        in_total = int(zc.get("in", 0))
+        out_total = int(zc.get("out", 0))
+
+        # pull per-class breakdowns if present
+        in_map = {}
+        out_map = {}
+        try:
+            if isinstance(bz, list) and i < len(bz):
+                in_map = dict(bz[i].get("in", {}))
+                out_map = dict(bz[i].get("out", {}))
+        except Exception:
+            pass
+
+        in_s = _fmt_counts(in_map)
+        out_s = _fmt_counts(out_map)
+
+        # Compose one line per zone, compact
+        line = f"{name}: "
+        line += f"IN ({in_total})"
+        line += f": {in_s}" if in_s else ""
+        line += "; "
+        line += f"OUT ({out_total})"
+        line += f": {out_s}" if out_s else ""
+        rows.append(line)
+
+    # ─── Global SUM across zones (per-class)
+    gsum = getattr(app, "_zone_class_totals_sum", None)
+    if have_zones and isinstance(gsum, dict) and (gsum.get("in") or gsum.get("out")):
+        if rows and rows[-1] != "":
+            rows.append("")
+        rows.append("SUM (zones)")
+        zin = _fmt_counts(gsum.get("in", {}))
+        zout = _fmt_counts(gsum.get("out", {}))
+        if zin:
+            rows.append(f"IN:  {zin}")
+        if zout:
+            rows.append(f"OUT: {zout}")
+
+    # Trim trailing spacer
+    while rows and rows[-1] == "":
+        rows.pop()
+
+    if not rows:
+        return
+
+    # measure text
     sizes = [cv2.getTextSize(t, font, txt_scale, th)[0] for t in rows]
-    maxw  = max(w for w, h in sizes)
+    maxw = max(w for w, h in sizes)
     lineh = max(h for w, h in sizes)
-    panel_w = maxw + 2*pad
-    panel_h = len(rows) * (lineh + gap) - gap + 2*pad
 
+    def _is_header(idx: int) -> bool:
+        return rows[idx] in ("Lines", "Zones", "SUM (zones)")
+
+    panel_w = maxw + 2 * pad
+    panel_h = 2 * pad
+    for i, _t in enumerate(rows):
+        panel_h += lineh
+        if i < len(rows) - 1:
+            panel_h += (sec_gap if _is_header(i) else gap)
+
+    # anchor
     if anchor == "tl":
         x0, y0 = mar, mar
     elif anchor == "tr":
@@ -146,9 +209,14 @@ def draw_counts_panel(frame,
     else:  # "br"
         x0, y0 = W - mar - panel_w, H - mar - panel_h
 
-    # solid black background for readability
+    # background
     cv2.rectangle(frame, (x0, y0), (x0 + panel_w, y0 + panel_h), (0, 0, 0), -1)
+
+    # render
     y = y0 + pad + lineh
-    for t in rows:
-        cv2.putText(frame, t, (x0 + pad, y), font, txt_scale, (255, 255, 255), th, cv2.LINE_AA)
-        y += lineh + gap
+    for i, t in enumerate(rows):
+        is_header = t in ("Lines", "Zones", "SUM (zones)")
+        use_th = th + 1 if is_header else th
+        cv2.putText(frame, t, (x0 + pad, y), font, txt_scale, (255, 255, 255), use_th, cv2.LINE_AA)
+        if i < len(rows) - 1:
+            y += lineh + (sec_gap if is_header else gap)

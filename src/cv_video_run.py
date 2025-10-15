@@ -541,6 +541,32 @@ def _update_counts_and_alerts(
                             "BA": 0,
                         }
                     )
+                    # Per-zone/per-class accumulation for HUD (right panel)
+                    try:
+                        label_name = (names[cid] if isinstance(names, dict) else names[cid]) if names else str(cid)
+                    except Exception:
+                        label_name = str(cid)
+
+                    # zone-local bucket
+                    try:
+                        z_buckets = app._zone_class_totals_by_zone
+                        bucket = z_buckets[zi]["in" if inside_now else "out"]
+                        bucket[label_name] = int(bucket.get(label_name, 0)) + 1
+                    except Exception:
+                        pass
+
+                    # global sum bucket
+                    try:
+                        g_bucket = app._zone_class_totals_sum["in" if inside_now else "out"]
+                        g_bucket[label_name] = int(g_bucket.get(label_name, 0)) + 1
+                    except Exception:
+                        pass
+                    
+                    
+                    
+                    
+                    
+                    
             else:
                 zone_states[zi][tid] = sstate
 
@@ -742,6 +768,9 @@ def run(app, sources, outp: Path, selected_idx):
             trails = {} if (getattr(app, "trace_enabled", None).get() if hasattr(app, "trace_enabled") else True) else None
             ev_i_saved = 0
             app._alert_state = {"last_ms": 0, "looping": False}
+            # Per-zone per-class totals and global sum (for right HUD)
+            app._zone_class_totals_by_zone = [{"in": {}, "out": {}} for _ in zones_cfg]
+            app._zone_class_totals_sum = {"in": {}, "out": {}}
 
             # Global counters per-source
             names_obj = getattr(app, "names", {})
