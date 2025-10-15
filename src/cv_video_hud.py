@@ -76,19 +76,13 @@ def draw_trails(frame, trails, trace_color=None, trace_thickness=2):
 # ---- HUD / results panel -----------------------------------------------------
 def draw_counts_panel(frame, lines_cfg, line_counts, zones_cfg, zone_counts, anchor="br", app=None):
     """
-    Right-side HUD: per-line AB/BA and per-zone IN/OUT with per-class breakdowns,
-    plus a global SUM across zones (per-class).
-    Example:
-        Lines
-        Main: AB 12, BA 9
+    Right-side HUD:
+      • Lines: AB/BA totals per line + per-class breakdowns on the same row.
+      • Zones: IN/OUT totals per zone + per-class breakdowns (as before).
+      • SUM (zones): global per-class IN/OUT.
 
-        Zones
-        Zone1: IN (5): person 3, car 2; OUT (2): person 1, car 1
-        Zone2: IN (2): car 2; OUT (2): person 2
-
-        SUM (zones)
-        IN:  person 5, car 4
-        OUT: person 3, car 1
+    Falls back to rebuilding per-class maps from events (app._ev_ref) if accumulators
+    are missing.
     """
     if frame is None:
         return
@@ -111,7 +105,7 @@ def draw_counts_panel(frame, lines_cfg, line_counts, zones_cfg, zone_counts, anc
     pad = int(8 * s)
     gap = int(6 * s)
     mar = int(12 * s)
-    sec_gap = int(10 * s)  # extra gap after section headers
+    sec_gap = int(10 * s)
 
     def _fmt_counts(dct):
         if not isinstance(dct, dict) or not dct:
@@ -119,45 +113,100 @@ def draw_counts_panel(frame, lines_cfg, line_counts, zones_cfg, zone_counts, anc
         keys = sorted(dct.keys())
         return ", ".join(f"{k} {int(dct[k])}" for k in keys)
 
+    # ---------- helper: per-line class maps from events ----------
+    def _compute_line_class_maps(app, lines_cfg):
+        maps = [{"ab": {}, "ba": {}} for _ in (lines_cfg or [])]
+        evs = getattr(app, "_ev_ref", None)
+        if not (isinstance(evs, list) and evs and lines_cfg):
+            return maps
+        name2idx = {str(ln.get("name", f"line_{i}")): i for i, ln in enumerate(lines_cfg)}
+        for e in evs:
+            et = str(e.get("event_type", ""))
+            if not et.startswith("line_"):
+                continue
+            nm = str(e.get("counter_name", ""))
+            idx = name2idx.get(nm, None)
+            if idx is None:
+                continue
+            cls = str(e.get("class_name", e.get("class_id", "")))
+            if et == "line_ab" or int(e.get("AB", 0)) == 1:
+                maps[idx]["ab"][cls] = int(maps[idx]["ab"].get(cls, 0)) + 1
+            elif et == "line_ba" or int(e.get("BA", 0)) == 1:
+                maps[idx]["ba"][cls] = int(maps[idx]["ba"].get(cls, 0)) + 1
+        return maps
+
+    # ---------- get per-zone class maps (fast path + fallback) ----------
+    bz = getattr(app, "_zone_class_totals_by_zone", None)
+    gsum = getattr(app, "_zone_class_totals_sum", None)
+    need_rebuild_zones = (
+        not isinstance(bz, list) or len(bz) != len(zones_cfg or []) or
+        all((not z or (not z.get("in") and not z.get("out"))) for z in (bz or []))
+    )
+    if need_rebuild_zones:
+        bz = [{"in": {}, "out": {}} for _ in (zones_cfg or [])]
+        gsum = {"in": {}, "out": {}}
+        evs = getattr(app, "_ev_ref", None)
+        if isinstance(evs, list) and evs:
+            name2idx = {str(zn.get("name", f"zone_{i}")): i for i, zn in enumerate(zones_cfg or [])}
+            for e in evs:
+                et = str(e.get("event_type", ""))
+                if not et.startswith("zone_"):
+                    continue
+                nm = str(e.get("counter_name", ""))
+                idx = name2idx.get(nm, None)
+                if idx is None:
+                    continue
+                cls = str(e.get("class_name", e.get("class_id", "")))
+                direction = "in" if et == "zone_in" else "out"
+                zmap = bz[idx][direction]; zmap[cls] = int(zmap.get(cls, 0)) + 1
+                gmap = gsum[direction];    gmap[cls] = int(gmap.get(cls, 0)) + 1
+
+    # ---------- build rows ----------
     rows = []
 
-    # ─── Lines
+    # ─── Lines with per-class breakdown on the same row
     if lines_cfg and line_counts:
         rows.append("Lines")
+        line_cls_maps = _compute_line_class_maps(app, lines_cfg)
         for i, ln in enumerate(lines_cfg):
             name = ln.get("name", f"line_{i}")
             lc = line_counts[i] if i < len(line_counts) else {"ab": 0, "ba": 0}
-            rows.append(f"{name}: AB {int(lc.get('ab', 0))}, BA {int(lc.get('ba', 0))}")
-        rows.append("")  # spacer
+            ab_total = int(lc.get("ab", 0)); ba_total = int(lc.get("ba", 0))
+            ab_map = line_cls_maps[i]["ab"] if i < len(line_cls_maps) else {}
+            ba_map = line_cls_maps[i]["ba"] if i < len(line_cls_maps) else {}
+            ab_s = _fmt_counts(ab_map); ba_s = _fmt_counts(ba_map)
+            dir_label = ln.get("dir_label") or ln.get("direction_label") or ""
+            if not dir_label:
+                try:
+                    dir_label = ab_dir_hint_for_line(ln)
+                except Exception:
+                    dir_label = ""
+            line = f"{name}: AB {ab_total}"
+            if ab_s: line += f" ({ab_s})"
+            line += "  |  "
+            line += f"BA {ba_total}"
+            if ba_s: line += f" ({ba_s})"
+            if dir_label:
+                line += f"  ({dir_label})"
+            rows.append(line)
+        rows.append("")
 
-    # ─── Zones with per-class breakdown
+    # ─── Zones with per-class breakdown (unchanged from your new spec)
     have_zones = bool(zones_cfg and zone_counts)
-    rows.append("Zones") if have_zones else None
-
-    # per-zone class buckets prepared by run.py
-    bz = getattr(app, "_zone_class_totals_by_zone", None)
+    if have_zones:
+        rows.append("Zones")
     for i, zn in enumerate(zones_cfg or []):
         name = zn.get("name", f"zone_{i}")
         zc = zone_counts[i] if i < len(zone_counts) else {"in": 0, "out": 0}
-        in_total = int(zc.get("in", 0))
-        out_total = int(zc.get("out", 0))
-
-        # pull per-class breakdowns if present
-        in_map = {}
-        out_map = {}
+        in_total = int(zc.get("in", 0)); out_total = int(zc.get("out", 0))
+        in_map = {}; out_map = {}
         try:
             if isinstance(bz, list) and i < len(bz):
-                in_map = dict(bz[i].get("in", {}))
-                out_map = dict(bz[i].get("out", {}))
+                in_map = dict(bz[i].get("in", {})); out_map = dict(bz[i].get("out", {}))
         except Exception:
             pass
-
-        in_s = _fmt_counts(in_map)
-        out_s = _fmt_counts(out_map)
-
-        # Compose one line per zone, compact
-        line = f"{name}: "
-        line += f"IN ({in_total})"
+        in_s = _fmt_counts(in_map); out_s = _fmt_counts(out_map)
+        line = f"{name}: IN ({in_total})"
         line += f": {in_s}" if in_s else ""
         line += "; "
         line += f"OUT ({out_total})"
@@ -165,26 +214,20 @@ def draw_counts_panel(frame, lines_cfg, line_counts, zones_cfg, zone_counts, anc
         rows.append(line)
 
     # ─── Global SUM across zones (per-class)
-    gsum = getattr(app, "_zone_class_totals_sum", None)
     if have_zones and isinstance(gsum, dict) and (gsum.get("in") or gsum.get("out")):
         if rows and rows[-1] != "":
             rows.append("")
         rows.append("SUM (zones)")
-        zin = _fmt_counts(gsum.get("in", {}))
-        zout = _fmt_counts(gsum.get("out", {}))
-        if zin:
-            rows.append(f"IN:  {zin}")
-        if zout:
-            rows.append(f"OUT: {zout}")
+        zin = _fmt_counts(gsum.get("in", {})); zout = _fmt_counts(gsum.get("out", {}))
+        if zin:  rows.append(f"IN:  {zin}")
+        if zout: rows.append(f"OUT: {zout}")
 
-    # Trim trailing spacer
     while rows and rows[-1] == "":
         rows.pop()
-
     if not rows:
         return
 
-    # measure text
+    # measure
     sizes = [cv2.getTextSize(t, font, txt_scale, th)[0] for t in rows]
     maxw = max(w for w, h in sizes)
     lineh = max(h for w, h in sizes)
@@ -209,10 +252,8 @@ def draw_counts_panel(frame, lines_cfg, line_counts, zones_cfg, zone_counts, anc
     else:  # "br"
         x0, y0 = W - mar - panel_w, H - mar - panel_h
 
-    # background
+    # background + render
     cv2.rectangle(frame, (x0, y0), (x0 + panel_w, y0 + panel_h), (0, 0, 0), -1)
-
-    # render
     y = y0 + pad + lineh
     for i, t in enumerate(rows):
         is_header = t in ("Lines", "Zones", "SUM (zones)")
@@ -220,3 +261,4 @@ def draw_counts_panel(frame, lines_cfg, line_counts, zones_cfg, zone_counts, anc
         cv2.putText(frame, t, (x0 + pad, y), font, txt_scale, (255, 255, 255), use_th, cv2.LINE_AA)
         if i < len(rows) - 1:
             y += lineh + (sec_gap if is_header else gap)
+

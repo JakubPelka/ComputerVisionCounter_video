@@ -765,6 +765,7 @@ def run(app, sources, outp: Path, selected_idx):
             zone_states = [{} for _ in zones_cfg]
             zone_counts = [{"in": 0, "out": 0} for _ in zones_cfg]
             events = []
+            app._ev_ref = events            # ← expose live events to HUD (per-class lines)
             trails = {} if (getattr(app, "trace_enabled", None).get() if hasattr(app, "trace_enabled") else True) else None
             ev_i_saved = 0
             app._alert_state = {"last_ms": 0, "looping": False}
