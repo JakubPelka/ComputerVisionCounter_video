@@ -1,4 +1,4 @@
-# INTERNAL README — ComputerVisionCounter (Video Edition)
+# INTERNAL README — ComputerVisionCounter (Video Edition) Readme_INT_2025_10_15
 
 **Date:** 2025‑10‑15
 **Audience:** Internal developers & maintainers
