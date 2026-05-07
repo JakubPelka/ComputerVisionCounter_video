@@ -63,6 +63,23 @@ def _is_stream_source(src):
     return False
 
 
+def _probe_source_fps(cap, fallback=30.0):
+    """
+    Try to get FPS from an opened cv2.VideoCapture.
+    Falls back to 'fallback' if value looks bogus (0, NaN, >240, etc.).
+    """
+    try:
+        val = cap.get(cv2.CAP_PROP_FPS)
+    except Exception:
+        return float(fallback)
+    try:
+        f = float(val)
+    except Exception:
+        return float(fallback)
+    if not math.isfinite(f) or f <= 0 or f > 240:
+        return float(fallback)
+    return float(f)
+
 def _ensure_bgr(img):
     if img is None:
         return img
@@ -706,31 +723,48 @@ def run(app, sources, outp: Path, selected_idx):
                 app._log(f"[WARN] Cannot open: {src_name}")
                 continue
 
+            # total frames for files (streams often report 0)
             total_frames = (
                 int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 if (not is_stream and cap.get(cv2.CAP_PROP_FRAME_COUNT) > 0)
                 else None
             )
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            fps = fps if fps and fps > 1e-3 else 25.0
-            W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
-            H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
 
-            start_perf = time.perf_counter()
-            start_epoch = time.time()
+            # --- preserve original FPS (uses your helper) ---
+            src_fps = _probe_source_fps(cap, fallback=30.0)  # ← keep input FPS when writing output
 
-            # first frame for file sources (to open editor)
+            # --- resolve dimensions + first frame (for files) ---
             if is_stream:
-                base_stem = _re.sub(r"[^A-Za-z0-9_]+", "_", src_name if isinstance(source, str) else f"cam_{source}")
-                default_cfg_path = cnt_dir / f"{base_stem}.json"
-                editor = CounterEditor(app, frame_bgr=None, default_cfg_path=default_cfg_path, live_cap=cap)
-                result, aborted = editor.run_modal()
+                # streams: rely on caps; may be 0 -> fallback
+                W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
+                H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
+                first_frame = None
             else:
                 ok, first_frame = cap.read()
                 if not ok or first_frame is None:
                     app._log(f"[ERR] No first frame: {src_name}")
                     cap.release()
                     continue
+                H, W = first_frame.shape[:2]
+
+            # backward-compat vars if later code expects these names
+            fps = src_fps
+            W = int(W); H = int(H)
+
+            # make FPS/size available for the writer later in the loop
+            app._current_src_fps = float(src_fps)
+            app._current_src_size = (W, H)
+
+            start_perf = time.perf_counter()
+            start_epoch = time.time()
+
+            # open counter editor
+            if is_stream:
+                base_stem = _re.sub(r"[^A-Za-z0-9_]+", "_", src_name if isinstance(source, str) else f"cam_{source}")
+                default_cfg_path = cnt_dir / f"{base_stem}.json"
+                editor = CounterEditor(app, frame_bgr=None, default_cfg_path=default_cfg_path, live_cap=cap)
+                result, aborted = editor.run_modal()
+            else:
                 base_stem = Path(src_name).stem if isinstance(source, (str, Path)) else f"cam_{source}"
                 default_cfg_path = cnt_dir / f"{base_stem}.json"
                 editor = CounterEditor(app, frame_bgr=first_frame, default_cfg_path=default_cfg_path, live_cap=None)
@@ -747,15 +781,42 @@ def run(app, sources, outp: Path, selected_idx):
             snap_enabled = bool(p.get("snapshot_on_events", False))
             snap_dir = ensure_dir(snap_root / f"{base_stem}_{run_tag}") if snap_enabled else None
 
+            # configs from editor
             lines_cfg = result.get("lines", []) or []
             zones_cfg = result.get("zones", []) or []
             stride = max(1, int(frame_skip))
 
-            writer, out_path = open_video_writer_collision(vids_dir / f"{base_stem}_annotated.mp4", W, H, fps)
-            if not writer or not writer.isOpened():
-                app._log(f"[ERR] Cannot open VideoWriter: {src_name}")
+            # ---------- open annotated video writer with original source FPS ----------
+            # Size: use probed W,H from capture/first_frame (already set above)
+            size_wh = (int(W), int(H))
+
+            # FPS: prefer preserved source FPS that we set after opening cap
+            src_fps = float(getattr(app, "_current_src_fps", fps if "fps" in locals() else 30.0))
+
+            writer = None
+            out_path = None
+
+            try:
+                # New API: open_video_writer_collision(out_dir, base_name, size_wh, fps, fourcc) -> (path, writer)
+                # Pass the *root* output dir (helper will create output/videos/).
+                out_path, writer = open_video_writer_collision(
+                    out_dir=outp,
+                    base_name=base_stem,
+                    size_wh=size_wh,
+                    fps=src_fps,
+                    fourcc="mp4v"
+                )
+            except TypeError:
+                # Legacy fallback: open_video_writer_collision(full_path, W, H, fps) -> (writer, out_path)
+                full_path = (vids_dir / f"{base_stem}_annotated.mp4")
+                writer, out_path = open_video_writer_collision(str(full_path), size_wh[0], size_wh[1], src_fps)
+
+            # validate writer
+            if not writer or not getattr(writer, "isOpened", lambda: False)():
+                app._log(f"[ERR] Cannot open VideoWriter: {src_name} (fps={src_fps}, size={size_wh})")
                 cap.release()
                 continue
+
 
             tracker = _make_bytetrack(conf, track_buffer, match_thresh, min_hits, fps)
 

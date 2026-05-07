@@ -70,45 +70,32 @@ You can stop anytime with **Abort**.
 
 ---
 
-## Outputs (in `output/`)
+## Outputs
 
-| File/Folder         | What it is                                                 |
-| ------------------- | ---------------------------------------------------------- |
-| `videos/*.mp4`      | Annotated video with overlays                              |
-| `events/*.csv`      | Detailed events log (time, class, counter name, direction) |
-| `events/snapshots/` | Optional still images when events happen                   |
-| `heatmap/`          | Heatmaps (only when heatmap is enabled)                    |
-| `summary/*.json`    | Summary of counts for the run                              |
+All results are written to the **`output/`** folder. Main subfolders:
 
-**CSV columns include:** `frame, time_sec, timecode, track_id, class_id, class_name, event_type, counter_name, AB, BA, conf`
+* **videos/** – annotated MP4s (if enabled).
+* **events/** – CSV log of all events (lines & zones).
+* **snapshot/** – optional still images captured on events (enable in Extras).
+* **heatmap/** – heatmaps (only when **Create heatmap** = On).
+* **summary/** – per‑run JSON/CSV summaries.
+* **counters/** – saved line/zone layouts for the source.
+* **temp/** – internal working files; safe to ignore.
 
----
+**Naming pattern** (illustrative):
 
-## Sound Alerts
+* We use the input **basename** (e.g., `myclip_1920x1080_30fps`) and a **run timestamp** `YYYYMMDD_HHMMSS`.
+* Examples (no exact filenames):
 
-* **Zone alerts:** play while objects are **inside** or **outside** a selected zone (looping or single ping with cooldown).
-* **Line alerts:** **single ping** each time a line is crossed (AB/BA).
-* Choose your sound file in **Advanced → Sound** and use the ▶ / ⏹ test buttons.
+  * `events/<basename>_<timestamp>_events.csv`
+  * `videos/<basename>_annotated.mp4`
+  * `summary/<basename>_<timestamp>_summary.(json|csv)`
+  * `heatmap/<basename>_<timestamp>_heatmap[_overlay|_rgba].png`
+  * `snapshot/<basename>_<timestamp>/*.jpg`
 
----
+**CSV columns:** `frame, time_sec, timecode, track_id, class_id, class_name, event_type, counter_name, AB, BA, conf`
 
-## Heatmaps (optional)
-
-* Turn on in **Advanced → Extras → Heatmap**.
-* When **off**: no heatmap files are written.
-* When **on**: heatmaps are saved **only** in `output/heatmap/`.
-* Options: intensity (alpha), contrast (gamma), point size (sigma), decay, rolling window length, save interval.
-* Transparent output treats true zero as **no‑data** (not blue).
-
----
-
-## Quality vs. Speed
-
-* Use the **Quality slider (1–5)** on the main screen:
-
-  * Lower = faster; Higher = more accurate.
-* The slider also updates **Advanced** parameters (confidence, NMS, tile size, tracker settings).
-* For long videos, consider **Frame Skip** (>1) in Advanced to process fewer frames.
+---er **Frame Skip** (>1) in Advanced to process fewer frames.
 
 ---
 
@@ -174,3 +161,30 @@ You may use, publish, and monetize the **outputs** you create (videos, images, C
 * Synchronized Quality slider ↔ Advanced.
 * Transparent heatmaps with true no‑data.
 * Presets: Apply / Save / Load for repeatable runs.
+
+## Folder layout (where files go)
+
+```
+Project root /
+├─ start.bat                 # Double‑click to launch the app (Windows)
+├─ indata/                   # Your input files (videos, images); you can point the GUI to any other folder as well
+├─ models/                   # YOLO .pt (or .zip that contains a .pt)
+├─ output/                   # Results for each run
+│  ├─ videos/                # Annotated MP4s (if enabled in your build)
+│  ├─ events/                # CSV_events.csv + optional snapshots/ per run
+│  ├─ summary/               # Run summaries (JSON + CSV)
+│  ├─ heatmap/               # Heatmaps (only when **Create heatmap** = On)
+│  └─ temp/                  # Temporary files created on demand
+├─ presets/                  # Your saved Advanced-options presets (.json)
+├─ sounds/                   # .wav files for alerts (Test/Stop inside Advanced → Sound)
+├─ src/                      # Application code (for reference; no need to edit to use the app)
+├─ wheels/ , _pkgs/          # Bundled Python wheels/deps (don’t modify)
+├─ Backups/ , reklam/ , temp/# Internal/support folders; safe to ignore
+└─ README*.md                # This guide
+```
+
+**Notes**
+
+* Heatmaps are created **only** if **Extras → Heatmap → Create heatmap = On**. When On, all heatmap files are written to `output/heatmap/` (overlay, raw, and RGBA); when Off, nothing is written there.
+* Event CSV now includes direction for line crossings (AB/BA) and per‑event `counter_name` so you can filter by line or zone.
+* HUD size (Extras → HUD) scales both the left "Now/Max" block and the right results panel.

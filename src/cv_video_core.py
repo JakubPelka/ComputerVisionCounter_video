@@ -1,7 +1,7 @@
 # cv_video_core.py — shared constants and utilities
 from __future__ import annotations
 from pathlib import Path
-import json, zipfile
+import json, zipfile, math, time   # ← add math, time
 import cv2
 import pandas as pd
 import torch
@@ -63,19 +63,42 @@ def numbered_path(path: Path) -> Path:
         if not cand.exists(): return cand
         i += 1
 
-def open_video_writer_collision(path: Path, w: int, h: int, fps: float) -> (cv2.VideoWriter, Path):
-    out_path = path
+def _safe_fps(val, default=30.0):
     try:
-        if out_path.exists():
-            try: out_path.unlink()
-            except Exception: pass
-        writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-        if writer.isOpened(): return writer, out_path
+        f = float(val)
     except Exception:
-        pass
-    out_path = numbered_path(path)
-    writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-    return writer, out_path
+        return float(default)
+    if not math.isfinite(f) or f <= 0 or f > 240:
+        return float(default)
+    return float(f)
+
+def open_video_writer_collision(out_dir: Path, base_name: str,
+                                size_wh: tuple[int, int],
+                                fps: float,
+                                fourcc: str = "mp4v") -> tuple[Path, cv2.VideoWriter]:
+    """
+    Create an mp4 writer in out_dir/videos with a unique filename if needed.
+    FPS is respected exactly as passed (validated by _safe_fps).
+    """
+    out_dir = Path(out_dir)
+    vid_dir = out_dir / "videos"
+    vid_dir.mkdir(parents=True, exist_ok=True)
+
+    ext = ".mp4"
+    stem = f"{base_name}_annotated"
+    path = vid_dir / f"{stem}{ext}"
+    if path.exists():
+        # collision-safe naming
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        path = vid_dir / f"{stem}_{ts}{ext}"
+
+    W, H = int(size_wh[0]), int(size_wh[1])
+    fcc = cv2.VideoWriter_fourcc(*fourcc)
+    fps = _safe_fps(fps)
+    writer = cv2.VideoWriter(str(path), fcc, fps, (W, H))
+    if not writer or not writer.isOpened():
+        raise RuntimeError(f"Could not open video writer for {path} (fps={fps}, size={(W,H)})")
+    return path, writer
 
 def save_json_collision(obj, path: Path) -> Path:
     try:
