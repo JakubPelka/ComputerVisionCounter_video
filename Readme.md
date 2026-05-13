@@ -2,7 +2,7 @@
 
 **Date:** 2025‑10‑15
 **Audience:** Internal developers & maintainers
-**Scope:** Desktop, Windows‑first, Tkinter UI. Single‑machine processing of video files and live streams. Commercial build (no MIT; internal licensing applies).
+**Scope:** Desktop, Windows‑first, Tkinter UI. Single‑machine processing of video files and live streams.
 
 ---
 
@@ -212,22 +212,3 @@ Implementation: `cv_video_heatmap.DetectionHeatmap`
 
 ---
 
-## 14. Versioning & Packaging
-
-* **Version tag:** `YYYY.MM.DD` in About dialog and release notes.
-* **Deliverable:** `.zip` with `src/`, `models/` (empty), `indata/` (empty), `output/` (empty), `presets/`, `sounds/`, `start.bat`, `README (public)`, `LICENSE (commercial)`.
-* **Smoke test:** run a short video; verify heatmap on/off; open CSV/JSON.
-
----
-
-## 15. License (Internal Note)
-
-* This build is under a **commercial, single‑user license**. No redistribution of source. For multi‑seat licensing, coordinate with product owner.
-
----
-
-## 16. Contacts
-
-* **Product / PM:** (fill)
-* **Tech lead:** (fill)
-* **Support mailbox:** (fill)
