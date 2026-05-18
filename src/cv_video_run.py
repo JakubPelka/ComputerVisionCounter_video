@@ -39,6 +39,7 @@ from cv_video_sound import SoundPlayer
 
 # Global counters (Now/Max HUD)
 from cv_video_stats import StatsAggregator
+from cv_video_zone_metrics import ZoneMetrics
 from cv_video_hud_extras import draw_run_counters
 
 # Heatmap (transparent zeros + masked overlay)
@@ -763,6 +764,7 @@ def run(app, sources, outp: Path, selected_idx):
             line_counts = [{"ab": 0, "ba": 0} for _ in lines_cfg]
             zone_states = [{} for _ in zones_cfg]
             zone_counts = [{"in": 0, "out": 0} for _ in zones_cfg]
+            zone_metrics = ZoneMetrics()
             events = []
             app._ev_ref = events            # ← expose live events to HUD (per-class lines)
             trails = {} if (getattr(app, "trace_enabled", None).get() if hasattr(app, "trace_enabled") else True) else None
@@ -882,6 +884,27 @@ def run(app, sources, outp: Path, selected_idx):
                     sound_player,
                     alert_loop,
                 )
+
+
+                try:
+                    zone_metrics.update_frame(
+                        frame_idx=frame_idx,
+                        time_sec=event_time_sec,
+                        timecode=timecode_str,
+                        clock=clock_str,
+                        zones_cfg=zones_cfg,
+                        det_ids=det_ids,
+                        det_cids=cids,
+                        det_confs=scores,
+                        anchors=anchors,
+                        names=names,
+                        point_in_polygon=point_in_polygon,
+                    )
+                except Exception as e:
+                    try:
+                        app._log(f"[WARN] Zone metrics update failed: {e}")
+                    except Exception:
+                        pass
 
                 ov = frame.copy()
                 ov = _draw_detections_safe(ov, boxes, scores, cids, det_ids, names, overlay_mode)
@@ -1100,6 +1123,26 @@ def run(app, sources, outp: Path, selected_idx):
             sum_csv_df = pd.DataFrame(sum_rows)
             sum_csv_path = save_csv_collision(sum_csv_df, summ_dir / f"{base_stem}_{run_tag}_summary.csv")
             app._log(f"Saved summary CSV: {sum_csv_path}")
+
+
+            # Additional per-zone analytics: dwell time and peak concurrent objects.
+            try:
+                dwell_rows = zone_metrics.dwell_rows(source=src_name, run_tag=run_tag)
+                peak_rows = zone_metrics.peak_rows(source=src_name, run_tag=run_tag)
+
+                dwell_df = pd.DataFrame(dwell_rows, columns=ZoneMetrics.DWELL_COLUMNS)
+                peak_df = pd.DataFrame(peak_rows, columns=ZoneMetrics.PEAK_COLUMNS)
+
+                if zones_cfg:
+                    dwell_path = save_csv_collision(dwell_df, summ_dir / f"{base_stem}_{run_tag}_zone_dwell_times.csv")
+                    peak_path = save_csv_collision(peak_df, summ_dir / f"{base_stem}_{run_tag}_zone_class_peaks.csv")
+                    app._log(f"Saved zone dwell metrics CSV: {dwell_path}")
+                    app._log(f"Saved zone class peak metrics CSV: {peak_path}")
+            except Exception as e:
+                try:
+                    app._log(f"[WARN] Zone metrics save failed: {e}")
+                except Exception:
+                    pass
 
             # final heatmap save (ONLY when enabled and ONLY to /heatmap)
             if heat_enabled:
