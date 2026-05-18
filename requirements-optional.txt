@@ -1,0 +1,11 @@
+# Optional experimental packages for future work.
+# Do not install all of them into the stable v0.1.0 environment unless testing.
+
+# RF-DETR detection / segmentation experiments
+rfdetr
+
+# Roboflow Inference experiments, including workflow-style tracker blocks
+inference
+
+# Alternative tracker experiments. Confirm the exact package before committing.
+# boxmot

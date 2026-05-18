@@ -649,7 +649,6 @@ def run(app, sources, outp: Path, selected_idx):
         )
 
         selected_class_ids_set = set(selected_idx or [])  # respected everywhere
-        selected_class_ids_arr = np.fromiter(selected_class_ids_set, dtype=int) if selected_class_ids_set else None
 
         for vi, source in enumerate(sources):
             src_name = (str(source) if not isinstance(source, (int,)) else f"cam_{source}")

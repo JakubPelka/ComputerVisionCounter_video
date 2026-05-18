@@ -327,30 +327,98 @@ def _writer_write_safe(writer, ov, fallback_frame, expected_WH, app):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# tracker helpers (delegated to cv_video_tracking)
+# tracker helpers (ByteTrack via Supervision)
 # ──────────────────────────────────────────────────────────────────────────────
 def _make_bytetrack(conf, track_buffer, match_thresh, min_hits, fps):
-    # Preserve current behaviour: ByteTrack remains the default tracker.
-    try:
-        from cv_video_tracking import make_tracker
-        return make_tracker(
-            "bytetrack",
-            conf=conf,
-            track_buffer=track_buffer,
-            match_thresh=match_thresh,
-            min_hits=min_hits,
-            fps=fps,
-        )
-    except Exception:
+    if sv is None or not hasattr(sv, "ByteTrack"):
         return None
+    try:
+        params = inspect.signature(sv.ByteTrack.__init__).parameters
+    except Exception:
+        try:
+            return sv.ByteTrack()
+        except Exception:
+            return None
+
+    kwargs = {}
+    if "track_thresh" in params:
+        kwargs["track_thresh"] = max(0.05, min(float(conf), 0.99))
+    if "track_buffer" in params:
+        kwargs["track_buffer"] = int(track_buffer)
+    if "match_thresh" in params:
+        kwargs["match_thresh"] = float(match_thresh)
+    if "min_hits" in params:
+        kwargs["min_hits"] = int(min_hits)
+    if "mot20" in params:
+        kwargs["mot20"] = False
+    if "frame_rate" in params:
+        kwargs["frame_rate"] = float(max(1.0, fps))
+
+    try:
+        return sv.ByteTrack(**kwargs)
+    except TypeError:
+        basic = {k: kwargs[k] for k in ("track_thresh", "track_buffer", "match_thresh") if k in kwargs}
+        try:
+            return sv.ByteTrack(**basic)
+        except Exception:
+            try:
+                return sv.ByteTrack()
+            except Exception:
+                return None
 
 
 def _track_update(tracker, boxes, scores, cids):
+    if tracker is None or boxes is None or boxes.shape[0] == 0 or sv is None:
+        return boxes, scores, cids, None
     try:
-        from cv_video_tracking import track_update
-        return track_update(tracker, boxes, scores, cids)
+        dets = sv.Detections(xyxy=boxes.astype(float), class_id=cids, confidence=scores)
     except Exception:
         return boxes, scores, cids, None
+
+    for mname in ("update_with_detections", "update"):
+        m = getattr(tracker, mname, None)
+        if m is None:
+            continue
+        try:
+            tracked = m(dets)
+        except Exception:
+            continue
+
+        if hasattr(tracked, "xyxy") and getattr(tracked, "tracker_id", None) is not None:
+            t_boxes = tracked.xyxy.astype(int)
+            t_ids = tracked.tracker_id.astype(int)
+            t_cids = (
+                tracked.class_id.astype(int)
+                if getattr(tracked, "class_id", None) is not None
+                else (cids[: len(t_ids)] if cids is not None else None)
+            )
+            if getattr(tracked, "confidence", None) is not None:
+                t_scores = tracked.confidence
+            else:
+                t_scores = scores[: len(t_ids)] if scores is not None and len(scores) >= len(t_ids) else None
+            return t_boxes, t_scores, t_cids, t_ids
+
+        # older trackers as list of objects
+        if isinstance(tracked, (list, tuple)) and len(tracked) > 0 and hasattr(tracked[0], "track_id"):
+            t_boxes, t_ids = [], []
+            for t in tracked:
+                tid = int(getattr(t, "track_id"))
+                if hasattr(t, "tlbr"):
+                    x1, y1, x2, y2 = map(int, t.tlbr)
+                elif hasattr(t, "to_tlbr"):
+                    x1, y1, x2, y2 = map(int, t.to_tlbr())
+                else:
+                    continue
+                t_ids.append(tid)
+                t_boxes.append([x1, y1, x2, y2])
+            if t_boxes:
+                t_boxes = np.asarray(t_boxes, dtype=int)
+                t_ids = np.asarray(t_ids, dtype=int)
+                t_scores = scores[: len(t_ids)] if scores is not None else None
+                t_cids = cids[: len(t_ids)] if cids is not None else None
+                return t_boxes, t_scores, t_cids, t_ids
+
+    return boxes, scores, cids, None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -566,11 +634,6 @@ def _update_counts_and_alerts(
 def run(app, sources, outp: Path, selected_idx):
     t0 = time.time()
     try:
-        from cv_video_performance import configure_opencv_runtime
-        configure_opencv_runtime(app)
-    except Exception:
-        pass
-    try:
         vids_dir = ensure_dir(outp / "videos")
         snap_root = ensure_dir(outp / "snapshot")
         ev_dir = ensure_dir(outp / "events")
@@ -649,7 +712,6 @@ def run(app, sources, outp: Path, selected_idx):
         )
 
         selected_class_ids_set = set(selected_idx or [])  # respected everywhere
-        selected_class_ids_arr = np.fromiter(selected_class_ids_set, dtype=int) if selected_class_ids_set else None
 
         for vi, source in enumerate(sources):
             src_name = (str(source) if not isinstance(source, (int,)) else f"cam_{source}")
@@ -832,13 +894,11 @@ def run(app, sources, outp: Path, selected_idx):
 
             def _handle_frame(frame, frame_idx):
                 nonlocal cur_time_sec
-                from cv_video_performance import inference_context
-                with inference_context():
-                    res = app.model(frame, imgsz=imgsz, conf=conf, iou=iou, device=device, verbose=False)
+                res = app.model(frame, imgsz=imgsz, conf=conf, iou=iou, device=device, verbose=False)
                 boxes, scores, cids = _parse_ultra_results(res)
 
                 if selected_class_ids_set and boxes.shape[0] > 0:
-                    mask_keep = np.isin(cids, selected_class_ids_arr)
+                    mask_keep = np.isin(cids, np.fromiter(selected_class_ids_set, dtype=int))
                     boxes = boxes[mask_keep]
                     scores = scores[mask_keep]
                     cids = cids[mask_keep]
