@@ -1,0 +1,29 @@
+# ComputerVisionCounter VIDEO
+# Pinned dependency set based on the current src/start.py bootstrap logic.
+# Python: 3.12 recommended.
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+numpy==1.26.4
+Pillow==10.4.0
+opencv-python==4.10.0.84
+PyYAML==6.0.1
+pandas==2.2.2
+scipy==1.11.4
+
+torch==2.3.1+cpu
+torchvision==0.18.1+cpu
+
+ultralytics==8.3.201
+lap>=0.5.12
+supervision>=0.20.0
+
+filelock==3.13.1
+typing_extensions==4.12.2
+sympy==1.13.3
+networkx==3.3
+Jinja2==3.1.4
+fsspec==2024.6.1
+mkl==2021.4.0
+intel-openmp==2021.4.0
+tbb==2021.11.0

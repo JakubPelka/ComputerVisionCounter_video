@@ -1,12 +1,134 @@
-/wheels
-/_pkgs
-/indata
-/results
-models/yolo11x.pt
-/__pycache__
-0.5.12
-/presets
-/output
-/src/__pycache__
-/temp
-/reklam
+# ComputerVisionCounter VIDEO — repository hygiene
+# Public repo = source/docs only.
+# Local data, generated outputs, dependency caches and model weights must stay outside Git.
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local dependency bundles / bootstrap folders
+_pkgs/
+_pkgs_new/
+_pkgs_old_*/
+wheels/*
+!wheels/.gitkeep
+!wheels/README.md
+
+# Local environment / secrets
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+*.token
+secrets.*
+config.local.*
+*.local
+
+# Local input data
+indata/*
+!indata/.gitkeep
+!indata/README.md
+
+# Generated outputs
+output/
+results/
+logs/
+*.log
+
+# Runtime presets created by the app
+# Keep only documentation/placeholders in the repository.
+presets/*
+!presets/.gitkeep
+!presets/README.md
+
+# Temporary/local working folders
+temp/
+TEMP/
+tmp/
+
+# Backups / archives
+Backups/
+backup/
+backups/
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+
+# Generated repository inspection files
+folder_structure.txt
+repo_file_tree.txt
+file_tree.txt
+
+# AI model weights and exported model formats
+# Model files are intentionally local and are not synchronized with Git.
+models/*
+!models/.gitkeep
+!models/README.md
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+*.pb
+*.mlmodel
+*.safetensors
+
+# Local media / heavy test files
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.m4v
+*.wmv
+*.flv
+*.jpg
+*.jpeg
+*.png
+*.tif
+*.tiff
+*.bmp
+*.wav
+*.mp3
+*.aac
+*.flac
+
+# Keep documentation/placeholders for sounds only.
+sounds/*
+!sounds/.gitkeep
+!sounds/README.md
+
+# Marketing / working material not needed for source repository
+reklam/
+
+# IDE / editor / OS
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Notebook / ad-hoc analysis
+.ipynb_checkpoints/
+*.ipynb

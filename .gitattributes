@@ -1,2 +1,38 @@
-# Auto detect text files and perform LF normalization
+# Normalize text files.
 * text=auto
+
+# Keep Windows launchers Windows-friendly.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Code and documentation.
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.csv text eol=lf
+
+# Binary / heavy assets.
+*.pt binary
+*.pth binary
+*.onnx binary
+*.engine binary
+*.tflite binary
+*.zip binary
+*.7z binary
+*.rar binary
+*.mp4 binary
+*.avi binary
+*.mov binary
+*.mkv binary
+*.webm binary
+*.wav binary
+*.mp3 binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.tif binary
+*.tiff binary
