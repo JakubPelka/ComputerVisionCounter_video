@@ -188,8 +188,7 @@ class App(AppUIMixin, tk.Tk):
         # Quality (slider) + label
         qf = tk.Frame(root); qf.pack(fill="x", pady=4)
         tk.Label(qf, text="Quality (1 = faster/lower, 5 = ULTRA)").pack(side="left")
-        tk.Scale(qf, from_=1, to=5, orient="horizontal", variable=self.quality,
-                 command=lambda *_: self._update_preset_label()).pack(side="left", fill="x", expand=True, padx=8)
+        tk.Scale(qf, from_=1, to=5, orient="horizontal", variable=self.quality, command=self._on_quality_slider_changed).pack(side="left", fill="x", expand=True, padx=8)
         self.preset_label = tk.Label(qf, text=""); self.preset_label.pack(side="left")
         self._update_preset_label()
 
@@ -244,11 +243,61 @@ class App(AppUIMixin, tk.Tk):
         tk.Entry(f, textvariable=var).pack(side="left", fill="x", expand=True, padx=6)
         tk.Button(f, text="Browse…", command=cmd).pack(side="left")
 
+    def _current_quality_preset(self) -> dict:
+        """Return the currently selected main Quality preset as a plain dict."""
+        try:
+            q = int(self.quality.get())
+        except Exception:
+            q = DEFAULT_QUALITY
+        return dict(VIDEO_PRESETS.get(q, VIDEO_PRESETS[DEFAULT_QUALITY]))
+
+    def _sync_quality_preset_to_adv(self, *, mark_manual_override: bool = False) -> dict:
+        """Copy the main Quality preset into runtime advanced params and open Advanced fields.
+
+        The main Quality slider is treated as the source of truth when the user moves it.
+        Manual Advanced values are preserved until the slider is moved again.
+        """
+        p = self._current_quality_preset()
+        for k in ("imgsz", "conf", "iou", "frame_skip", "track_buffer", "match_thresh", "min_hits"):
+            if k in p:
+                self.adv_params[k] = p[k]
+
+        # False means: use main Quality preset as the current source.
+        # True is set by Advanced Apply/Load and means: preserve manual Advanced values.
+        self.advanced_override = bool(mark_manual_override)
+
+        # If the Advanced window is currently open, update its fields immediately.
+        var_map = {
+            "imgsz": "v_imgsz",
+            "conf": "v_conf",
+            "iou": "v_iou",
+            "frame_skip": "v_frame_skip",
+            "track_buffer": "v_track_buffer",
+            "match_thresh": "v_match_thresh",
+            "min_hits": "v_min_hits",
+        }
+        for key, attr in var_map.items():
+            var = getattr(self, attr, None)
+            if var is not None and hasattr(var, "set") and key in p:
+                try:
+                    var.set(str(p[key]))
+                except Exception:
+                    pass
+        return p
+
+    def _on_quality_slider_changed(self, *_):
+        """Handle main Quality slider changes and keep Advanced values in sync."""
+        self._sync_quality_preset_to_adv(mark_manual_override=False)
+        self._update_preset_label()
+
     def _update_preset_label(self):
-        p = VIDEO_PRESETS.get(int(self.quality.get()), VIDEO_PRESETS[DEFAULT_QUALITY])
-        self.preset_label.config(text=(f"imgsz={p['imgsz']}  conf={p['conf']}  iou={p['iou']}  "
-                                       f"skip={p['frame_skip']}  buf={p['track_buffer']}  "
-                                       f"match={p['match_thresh']}  hits={p['min_hits']}"))
+        p = self._current_quality_preset()
+        try:
+            self.preset_label.config(text=(f"imgsz={p['imgsz']} conf={p['conf']} iou={p['iou']} "
+                                           f"skip={p['frame_skip']} buf={p['track_buffer']} "
+                                           f"match={p['match_thresh']} hits={p['min_hits']}"))
+        except Exception:
+            pass
 
     def _toggle_all_classes(self):
         for _nm, var, _idx in getattr(self, "class_vars", []):

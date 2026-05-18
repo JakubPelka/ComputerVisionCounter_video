@@ -216,10 +216,11 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         "heat_memory_mult": p.get("heat_memory_mult", 2.0),
     }
 
-    q = _extract_quality_from_main(app)
-    for k, v in q.items():
-        if k in defaults and v is not None:
-            defaults[k] = v
+    if not bool(getattr(app, "advanced_override", False)):
+        q = _extract_quality_from_main(app)
+        for k, v in q.items():
+            if k in defaults and v is not None:
+                defaults[k] = v
 
     def _ensure(name, cls, value):
         if hasattr(app, name) and isinstance(getattr(app, name), cls):
@@ -512,7 +513,17 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
             "_meta": {"version": 23, "saved_at": datetime.now().isoformat(timespec="seconds")},
         }
 
-    ttk.Button(bar, text="Apply", command=lambda: app.adv_params.update(_collect())).pack(side="left")
+    def _apply_settings():
+        data = _collect()
+        app.adv_params.update(data)
+        app.advanced_override = True
+        try:
+            if hasattr(app, "_log"):
+                app._log("[ADV] Advanced settings applied.")
+        except Exception:
+            pass
+
+    ttk.Button(bar, text="Apply", command=_apply_settings).pack(side="left")
 
     def _save_preset():
         data = _collect()
@@ -560,7 +571,7 @@ def build_advanced_settings(parent: tk.Misc, app) -> ttk.Frame:
         v_heat_window_enabled.set(bool(G("heat_window_enabled", defaults["heat_window_enabled"]))); v_heat_window_minutes.set(float(G("heat_window_minutes", defaults["heat_window_minutes"])))
         v_heat_decay.set(float(G("heat_decay", defaults["heat_decay"]))); v_heat_save_interval_s.set(int(G("heat_save_interval_s", defaults["heat_save_interval_s"])))
         v_heat_gain.set(float(G("heat_gain", defaults["heat_gain"]))); v_heat_memory_mult.set(float(G("heat_memory_mult", defaults["heat_memory_mult"])))
-        app.adv_params.update(_collect())
+        _apply_settings()
 
     ttk.Button(bar, text="Save preset…", command=_save_preset).pack(side="left", padx=(8,0))
     ttk.Button(bar, text="Load preset…", command=_load_preset).pack(side="left", padx=(8,0))
