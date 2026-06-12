@@ -649,6 +649,17 @@ def run(app, sources, outp: Path, selected_idx):
             f"track_buffer={track_buffer}, match={match_thresh}, hits={min_hits}, device={device}"
         )
 
+        save_annotated_video = True
+        try:
+            save_var = getattr(app, "save_annotated_video", None)
+            save_annotated_video = bool(save_var.get()) if save_var is not None else bool(p.get("save_annotated_video", True))
+        except Exception:
+            save_annotated_video = bool(p.get("save_annotated_video", True))
+        try:
+            app._log(f"Output video: {'enabled' if save_annotated_video else 'disabled'}")
+        except Exception:
+            pass
+
         selected_class_ids_set = set(selected_idx or [])  # respected everywhere
         selected_class_ids_arr = np.fromiter(selected_class_ids_set, dtype=int) if selected_class_ids_set else None
 
@@ -725,7 +736,7 @@ def run(app, sources, outp: Path, selected_idx):
             zones_cfg = result.get("zones", []) or []
             stride = max(1, int(frame_skip))
 
-            # ---------- open annotated video writer with original source FPS ----------
+            # ---------- optionally open annotated video writer with original source FPS ----------
             # Size: use probed W,H from capture/first_frame (already set above)
             size_wh = (int(W), int(H))
 
@@ -735,27 +746,32 @@ def run(app, sources, outp: Path, selected_idx):
             writer = None
             out_path = None
 
-            try:
-                # New API: open_video_writer_collision(out_dir, base_name, size_wh, fps, fourcc) -> (path, writer)
-                # Pass the *root* output dir (helper will create output/videos/).
-                out_path, writer = open_video_writer_collision(
-                    out_dir=outp,
-                    base_name=base_stem,
-                    size_wh=size_wh,
-                    fps=src_fps,
-                    fourcc="mp4v"
-                )
-            except TypeError:
-                # Legacy fallback: open_video_writer_collision(full_path, W, H, fps) -> (writer, out_path)
-                full_path = (vids_dir / f"{base_stem}_annotated.mp4")
-                writer, out_path = open_video_writer_collision(str(full_path), size_wh[0], size_wh[1], src_fps)
+            if save_annotated_video:
+                try:
+                    # New API: open_video_writer_collision(out_dir, base_name, size_wh, fps, fourcc) -> (path, writer)
+                    # Pass the *root* output dir (helper will create output/videos/).
+                    out_path, writer = open_video_writer_collision(
+                        out_dir=outp,
+                        base_name=base_stem,
+                        size_wh=size_wh,
+                        fps=src_fps,
+                        fourcc="mp4v"
+                    )
+                except TypeError:
+                    # Legacy fallback: open_video_writer_collision(full_path, W, H, fps) -> (writer, out_path)
+                    full_path = (vids_dir / f"{base_stem}_annotated.mp4")
+                    writer, out_path = open_video_writer_collision(str(full_path), size_wh[0], size_wh[1], src_fps)
 
-            # validate writer
-            if not writer or not getattr(writer, "isOpened", lambda: False)():
-                app._log(f"[ERR] Cannot open VideoWriter: {src_name} (fps={src_fps}, size={size_wh})")
-                cap.release()
-                continue
-
+                # validate writer only when video output is enabled
+                if not writer or not getattr(writer, "isOpened", lambda: False)():
+                    app._log(f"[ERR] Cannot open VideoWriter: {src_name} (fps={src_fps}, size={size_wh})")
+                    cap.release()
+                    continue
+            else:
+                try:
+                    app._log("[INFO] Annotated video saving disabled — CSV/JSON/preview/metrics still run.")
+                except Exception:
+                    pass
 
             tracker = _make_bytetrack(conf, track_buffer, match_thresh, min_hits, fps)
 
@@ -982,7 +998,8 @@ def run(app, sources, outp: Path, selected_idx):
             if not is_stream and "first_frame" in locals() and first_frame is not None:
                 if (processed % stride) == 0:
                     ov = _handle_frame(first_frame, processed)
-                    _writer_write_safe(writer, _ensure_bgr(ov), first_frame, (W, H), app)
+                    if save_annotated_video and writer is not None:
+                        _writer_write_safe(writer, _ensure_bgr(ov), first_frame, (W, H), app)
                     _preview(app, ov, processed, fps, total_frames)
                 processed += 1
 
@@ -998,7 +1015,8 @@ def run(app, sources, outp: Path, selected_idx):
                     processed += 1
                     continue
                 ov = _handle_frame(frame, processed)
-                _writer_write_safe(writer, _ensure_bgr(ov), frame, (W, H), app)
+                if save_annotated_video and writer is not None:
+                    _writer_write_safe(writer, _ensure_bgr(ov), frame, (W, H), app)
                 _preview(app, ov, processed, fps, total_frames)
 
                 # periodic heatmap save to /heatmap ONLY
@@ -1040,7 +1058,8 @@ def run(app, sources, outp: Path, selected_idx):
                 pass
 
             cap.release()
-            writer.release()
+            if writer is not None:
+                writer.release()
 
             # === SAVE RESULTS ===
             ev_df = pd.DataFrame(events)
@@ -1053,6 +1072,8 @@ def run(app, sources, outp: Path, selected_idx):
                 "frames": int(processed),
                 "fps": float(fps),
                 "duration_s": float(processed / max(fps, 1e-6)),
+                "save_annotated_video": bool(save_annotated_video),
+                "annotated_video_path": str(out_path) if out_path else "",
                 "lines": [{"name": ln["name"], **line_counts[i]} for i, ln in enumerate(lines_cfg)],
                 "zones": [{"name": zn["name"], **zone_counts[i]} for i, zn in enumerate(zones_cfg)],
                 "advanced": {
@@ -1092,6 +1113,8 @@ def run(app, sources, outp: Path, selected_idx):
                     "frames": int(processed),
                     "fps": float(fps),
                     "duration_s": float(processed / max(fps, 1e-6)),
+                    "save_annotated_video": bool(save_annotated_video),
+                    "annotated_video_path": str(out_path) if out_path else "",
                     "lines_cfg": len(lines_cfg),
                     "zones_cfg": len(zones_cfg),
                 }

@@ -62,6 +62,7 @@ class App(AppUIMixin, tk.Tk):
         self.quality = tk.IntVar(value=DEFAULT_QUALITY)
         self.tracker_kind = tk.StringVar(value=DEFAULT_TRACKER)
         self.overlay_mode = tk.StringVar(value="centroid")
+        self.save_annotated_video = tk.BooleanVar(value=True)
 
         self.model = None; self.names = None; self.class_vars = []
         self.selected_files = []
@@ -94,6 +95,7 @@ class App(AppUIMixin, tk.Tk):
             "trace_thickness": 2,
             "overlay_frame_color": "auto",
             "overlay_frame_thickness": 2,
+            "save_annotated_video": True,
         }
 
         # bindings (used by run)
@@ -168,6 +170,12 @@ class App(AppUIMixin, tk.Tk):
         tk.Button(f_files, text="Clear selection", command=self.clear_files).pack(side="left", padx=(8,0))
 
         self._row_browse(root, "Output folder (default: ./output):", self.output_dir, self.browse_output, is_dir=True)
+        out_opts = tk.Frame(root); out_opts.pack(fill="x", pady=(0, 3))
+        tk.Checkbutton(
+            out_opts,
+            text="Save annotated video (large files)",
+            variable=self.save_annotated_video
+        ).pack(side="left", padx=(26, 0))
         self._row_browse(root, "Weights (.pt/.zip):", self.weights_path, self.browse_weights, is_dir=False)
 
         # Source
@@ -532,6 +540,11 @@ class App(AppUIMixin, tk.Tk):
 
             out_base = Path(self.output_dir.get().strip()) if self.output_dir.get().strip() else DEFAULT_OUT_DIR
             outp = ensure_dir(out_base)
+
+            try:
+                self.adv_params["save_annotated_video"] = bool(self.save_annotated_video.get())
+            except Exception:
+                pass
 
             self.worker_done.clear()
             self.worker_thread = threading.Thread(target=core_run, args=(self, sources, outp, selected_idx), daemon=True)
