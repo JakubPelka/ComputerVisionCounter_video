@@ -132,3 +132,4 @@ desktop.ini
 # Notebook / ad-hoc analysis
 .ipynb_checkpoints/
 *.ipynb
+/.venv_cuda

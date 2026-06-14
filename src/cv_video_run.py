@@ -40,6 +40,7 @@ from cv_video_sound import SoundPlayer
 # Global counters (Now/Max HUD)
 from cv_video_stats import StatsAggregator
 from cv_video_zone_metrics import ZoneMetrics
+from cv_video_event_log import LiveEventCsvWriter
 from cv_video_hud_extras import draw_run_counters
 
 # Heatmap (transparent zeros + masked overlay)
@@ -782,6 +783,12 @@ def run(app, sources, outp: Path, selected_idx):
             zone_counts = [{"in": 0, "out": 0} for _ in zones_cfg]
             zone_metrics = ZoneMetrics()
             events = []
+            live_event_writer = LiveEventCsvWriter(ev_dir / f"{base_stem}_{run_tag}_events_live.csv")
+            live_ev_i_saved = 0
+            try:
+                app._log(f"Live events CSV: {live_event_writer.path}")
+            except Exception:
+                pass
             app._ev_ref = events            # ← expose live events to HUD (per-class lines)
             trails = {} if (getattr(app, "trace_enabled", None).get() if hasattr(app, "trace_enabled") else True) else None
             ev_i_saved = 0
@@ -849,7 +856,7 @@ def run(app, sources, outp: Path, selected_idx):
             cur_time_sec = 0.0  # updated every frame
 
             def _handle_frame(frame, frame_idx):
-                nonlocal cur_time_sec
+                nonlocal cur_time_sec, live_ev_i_saved
                 from cv_video_performance import inference_context
                 with inference_context():
                     res = app.model(frame, imgsz=imgsz, conf=conf, iou=iou, device=device, verbose=False)
@@ -901,6 +908,18 @@ def run(app, sources, outp: Path, selected_idx):
                     alert_loop,
                 )
 
+                # Append newly created events immediately.
+                # This protects long runs from losing all event records on crash/abort.
+                try:
+                    total_live_events = len(events)
+                    if total_live_events > live_ev_i_saved:
+                        live_event_writer.write_events(events[live_ev_i_saved:total_live_events])
+                        live_ev_i_saved = total_live_events
+                except Exception as e:
+                    try:
+                        app._log(f"[WARN] Live event CSV write failed: {e}")
+                    except Exception:
+                        pass
 
                 try:
                     zone_metrics.update_frame(
